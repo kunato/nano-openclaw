@@ -2,7 +2,7 @@ import type { Scheduler, Schedule, JobPayload } from "../scheduler.js";
 import type { NanoToolDefinition } from "./types.js";
 import { textResult, jsonTextResult } from "./types.js";
 
-const ACTIONS = ["add", "list", "remove", "update"] as const;
+const ACTIONS = ["add", "list", "remove", "update", "run", "status"] as const;
 
 export function createReminderTool(scheduler: Scheduler, sessionKey: string): NanoToolDefinition {
   return {
@@ -15,12 +15,16 @@ ACTIONS:
 - list: List all active jobs
 - remove: Delete a job by id
 - update: Update a job (requires id + fields to update)
+- run: Manually trigger a job immediately by id (bypasses schedule)
+- status: Show scheduler overview (total, enabled, running, queued)
 
 SCHEDULE TYPES:
 - One-shot: { "kind": "at", "at": "<ISO-8601 timestamp>" }
   Example: { "kind": "at", "at": "2025-02-18T19:00:00+07:00" }
 - Recurring cron: { "kind": "cron", "expr": "<cron-expression>", "tz": "<IANA timezone>" }
   Example: { "kind": "cron", "expr": "0 19 * * *", "tz": "Asia/Bangkok" } (every day at 7pm Bangkok time)
+- Interval: { "kind": "every", "intervalMs": <milliseconds> }
+  Example: { "kind": "every", "intervalMs": 3600000 } (every hour)
 
 CRON EXPRESSION FORMAT: minute hour day-of-month month day-of-week
   - "0 19 * * *" = every day at 19:00
@@ -45,7 +49,10 @@ EXAMPLES:
   { "action": "add", "name": "morning-briefing", "schedule": { "kind": "cron", "expr": "0 8 * * *", "tz": "Asia/Bangkok" }, "payload": { "kind": "agentTurn", "message": "Search for today's top tech news and Bangkok weather, then send a concise morning briefing." } }
 
 - One-shot reminder:
-  { "action": "add", "name": "meeting-reminder", "schedule": { "kind": "at", "at": "2025-02-18T14:00:00+07:00" }, "payload": { "kind": "systemEvent", "text": "Your meeting starts in 30 minutes!" } }`,
+  { "action": "add", "name": "meeting-reminder", "schedule": { "kind": "at", "at": "2025-02-18T14:00:00+07:00" }, "payload": { "kind": "systemEvent", "text": "Your meeting starts in 30 minutes!" } }
+
+- Check stock prices every 2 hours:
+  { "action": "add", "name": "stock-check", "schedule": { "kind": "every", "intervalMs": 7200000 }, "payload": { "kind": "agentTurn", "message": "Search for current AAPL and TSLA stock prices and summarize any significant changes." } }`,
     parameters: {
       type: "object",
       properties: {
@@ -150,6 +157,21 @@ EXAMPLES:
           return jsonTextResult({ status: "updated", job: formatJob(job) });
         }
 
+        case "run": {
+          const id = String(params.id ?? "");
+          if (!id) return textResult("Error: id is required");
+          const ran = await scheduler.runNow(id);
+          return jsonTextResult({
+            status: ran ? "executed" : "not_found",
+            id,
+          });
+        }
+
+        case "status": {
+          const s = scheduler.status();
+          return jsonTextResult(s);
+        }
+
         default:
           return textResult(`Error: unknown action "${action}". Use: ${ACTIONS.join(", ")}`);
       }
@@ -170,6 +192,7 @@ function formatJob(job: {
   lastRunAt?: string;
   lastError?: string;
   runCount: number;
+  state: { nextRunAtMs?: number; consecutiveFailures: number };
 }) {
   return {
     id: job.id,
@@ -188,5 +211,9 @@ function formatJob(job: {
     lastRunAt: job.lastRunAt,
     lastError: job.lastError,
     runCount: job.runCount,
+    nextRunAt: job.state.nextRunAtMs
+      ? new Date(job.state.nextRunAtMs).toISOString()
+      : null,
+    consecutiveFailures: job.state.consecutiveFailures,
   };
 }

@@ -1,234 +1,191 @@
 # nano-openclaw
 
-[OpenClaw](https://github.com/openclaw/openclaw) took the world by storm by showing what next-generation personal AI agents look like — an engineering masterpiece of personal assistant, persistent memory, web tools, scheduling, and sandboxed execution. But in the LLM era, where concepts are blurred and moving constantly, understanding *how* it all works can be hard.
+A useful personal AI assistant doesn't need much. It needs to **remember** you, **reach** you where you are, **act** on your behalf, and **not break things**. That's it.
 
-**nano-openclaw** bridges that gap: a **fully working personal AI assistant** in **~3k lines of TypeScript** — code you can read in an afternoon, extend in a day, and deploy with confidence. It demonstrates how to build a production-grade agent with **security best practices** (including **Docker-sandboxed code execution**) while stripping away the complexity, allowing practitioners and researchers to understand, modify, and extend the core logic.
+[OpenClaw](https://github.com/openclaw/openclaw) proved what a next-generation personal AI agent looks like. **nano-openclaw** distills those patterns into **~4k lines of TypeScript** — every subsystem fits in a single file, the whole thing is readable in an afternoon, and it actually works as a daily-driver assistant.
 
-### Why nano-openclaw?
+> **The "nano" philosophy:** not fewer features — fewer lines per feature. Every pattern here is production-grade, just stripped to its essence.
 
-- **Understand it** — every subsystem (memory, tools, scheduling, sandboxing) fits in a single file you can read top-to-bottom
-- **Extend it** — clean interfaces for adding tools, channels, and skills — no framework magic
-- **Trust it** — Docker sandbox isolates all code execution with isolate execution environment, dropped capabilities, and network isolation
-- **Ship it** — `npm install`, set two env vars, and you have a fully functional assistant on Discord
+## What Makes a Useful Assistant
 
-## What Can It Do?
+A personal assistant is only as good as its weakest link. Drop any one of these and the experience breaks:
 
-| Capability | How |
-|---|---|
-| **Code with you** | ReAct agent loop — reads, writes, edits files, runs shell commands |
-| **Remember things** | Persistent memory + LLM-based consolidation (`MEMORY.md`, `HISTORY.md`) |
-| **Browse the web** | Brave Search + Readability + PDF extraction + Puppeteer browser automation |
-| **Run on schedule** | Cron jobs and one-time reminders with timezone support |
-| **See images** | Vision support — send images in Discord, Slack, or WhatsApp, get screenshots from tools |
-| **Execute safely** | Docker sandbox on code execution — production security in minimal code |
-| **Talk where you work** | Discord, Slack, and WhatsApp support (extensible via `Channel` interface) |
-| **Learn your project** | Skills (`skills/*.md`) and bootstrap context (`AGENTS.md`) |
+**1. It remembers you**
+
+Not just within a conversation — across all of them. nano-openclaw has a persistent memory tool (store/search/update/delete) plus automatic LLM-driven consolidation that distills long conversations into `MEMORY.md` (facts, injected into every prompt) and `HISTORY.md` (events, searchable on demand). You never have to repeat yourself.
+
+**2. It reaches you where you are**
+
+Discord, Slack, or WhatsApp — configure one or all. Each is a thin adapter (~150 lines) over a shared `Channel` interface. Adding a new platform is one file.
+
+**3. It acts, not just responds**
+
+The agent can read/write/edit files, run shell commands, search the web, fetch and parse pages (HTML via Readability, PDFs via pdf.js), automate a browser, and download files. These aren't demos — they're the tools you actually need day-to-day.
+
+**4. It thinks ahead**
+
+A scheduler handles cron jobs, intervals, and one-shot reminders — with retry, backoff, and auto-disable so broken jobs don't spam you. A heartbeat service wakes the agent every 30 minutes to review workspace state (`MEMORY.md`, `HISTORY.md`, `TODO.md`) and take initiative without being asked.
+
+**5. It doesn't break things**
+
+Shell commands run inside a Docker sandbox (optional but recommended). Context overflow is handled with automatic retry, memory flush, and history compaction. Corrupted sessions self-repair. Tool results are truncated and images normalized before hitting the API. The boring reliability work is done.
+
+## Quick Start
+
+```bash
+npm install
+cp .env.example .env    # set MODEL_API_KEY + at least one channel
+npm run dev
+```
+
+**Required env vars:**
+
+- `MODEL_API_KEY` — Anthropic API key (`MODEL_PROVIDER` currently only supports `anthropic`)
+- At least one channel: `DISCORD_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, or `WHATSAPP_ENABLED=true`
+
+**Optional:** `BRAVE_API_KEY` (web search), `SANDBOX_ENABLED=true` (Docker sandbox)
+
+<details>
+<summary>Channel setup guides</summary>
+
+#### Discord
+
+1. [Developer Portal](https://discord.com/developers/applications) → New Application → Bot
+2. Enable **Message Content Intent**
+3. Copy token → `DISCORD_TOKEN`
+4. OAuth2 → `bot` scope + `Send Messages`, `Read Message History` → invite to server
+
+#### Slack
+
+1. [Slack API](https://api.slack.com/apps) → Create New App → Enable **Socket Mode**
+2. Event Subscriptions: `message.channels`, `message.im`, `app_mention`
+3. Scopes: `app_mentions:read`, `channels:history`, `chat:write`, `files:write`, `im:history`, `im:write`
+4. Install → copy `SLACK_BOT_TOKEN` (xoxb-…) and `SLACK_APP_TOKEN` (xapp-…)
+
+#### WhatsApp
+
+1. Set `WHATSAPP_ENABLED=true`
+2. Run the agent — scan the QR code with WhatsApp mobile
+
+</details>
 
 ## Architecture
 
 ```
-Message (Discord / Slack / WhatsApp)
-  → ChannelManager
-    → AgentRunner.handleMessage()
-      → Pi SDK session.prompt()  ← ReAct loop (LLM ↔ tools)
-        Built-in:  read, write, edit, bash, list_dir, find, grep
-        Custom:    memory, web_search, web_fetch, browser, reminder, file_ops
-      → extract response + images
-    → reply to Channel
+You (Discord / Slack / WhatsApp)
+  → Channel adapter → AgentRunner
+    → LLM ↔ tools (ReAct loop)
+    → response → Channel adapter → You
+
+Scheduler (cron / interval / one-shot)
+  → fires job → AgentRunner → delivers to channel
+
+Heartbeat (every 30 min)
+  → reads workspace context → AgentRunner → proactive action
 ```
 
-### Project Structure
-
-```
-src/
-├── index.ts                # Entry point — loads enabled channels + scheduler
-├── config.ts               # .env configuration loader
-├── agent.ts                # Agent runner — Pi SDK wrapper, retry, streaming
-├── prompt.ts               # System prompt builder
-├── memory.ts               # File-based persistent memory store
-├── scheduler.ts            # Cron & one-time job scheduler
-├── tools.ts                # Custom tool registry
-├── agent/                  # Agent subsystems
-│   ├── compaction.ts       #   Auto-compaction with reserve tokens
-│   ├── consolidation.ts    #   LLM-driven memory consolidation
-│   ├── context-overflow.ts #   Context error recovery & retry
-│   ├── history.ts          #   Session history sanitization
-│   ├── memory-flush.ts     #   Pre-compaction memory preservation
-│   ├── session-repair.ts   #   Corrupted session file repair
-│   ├── skills.ts           #   Workspace skills loader
-│   ├── tool-wrappers.ts    #   Result truncation & image normalization
-│   └── utils.ts            #   Tool metadata & response extraction
-├── tools/                  # Individual tool implementations
-│   ├── web-search.ts       #   Brave web search
-│   ├── web-fetch.ts        #   Readability + PDF fetching
-│   ├── browser.ts          #   Puppeteer browser automation
-│   ├── file-ops.ts         #   File download & management
-│   └── reminder.ts         #   Scheduled task tool
-├── sandbox/                # Docker sandbox for isolated execution
-├── media/                  # Image processing (sharp)
-└── channels/               # Extensible channel interface
-    ├── base.ts             #   Channel interface
-    ├── manager.ts          #   Multi-channel manager
-    ├── discord.ts          #   Discord implementation
-    ├── slack.ts            #   Slack implementation
-    └── whatsapp.ts         #   WhatsApp implementation (baileys)
-```
-
-## Quick Start
-
-### 1. Install
-
-```bash
-npm install
-```
-
-### 2. Configure
-
-```bash
-cp .env.example .env
-```
-
-**Required:**
-- `MODEL_API_KEY` — Anthropic (or other provider) API key
-- At least one channel configured:
-  - **Discord**: `DISCORD_TOKEN`
-  - **Slack**: `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`
-  - **WhatsApp**: `WHATSAPP_ENABLED=true`
-
-**Optional:**
-- `MODEL_PROVIDER` — defaults to `anthropic` (currently the only supported provider)
-- `MODEL_ID` — defaults to `claude-sonnet-4-20250514`
-- `WORKSPACE_DIR` — agent workspace (defaults to repo's `workspace/` directory)
-- `BRAVE_API_KEY` — enables web search
-- `SANDBOX_ENABLED=true` — enables Docker sandboxing (see [Sandbox](#docker-sandbox) below)
-
-### 3. Create a Bot
-
-#### Discord
-1. [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Bot
-2. Enable **Message Content Intent** under Privileged Gateway Intents
-3. Copy token → `DISCORD_TOKEN` in `.env`
-4. OAuth2 → URL Generator → `bot` scope + `Send Messages`, `Read Message History` → invite to server
-
-#### Slack
-1. [Slack API](https://api.slack.com/apps) → Create New App → From scratch
-2. **Socket Mode** → Enable Socket Mode
-3. **Event Subscriptions** → Enable → Subscribe to `message.channels`, `message.im`, `app_mention`
-4. **OAuth & Permissions** → Scopes: `app_mentions:read`, `channels:history`, `chat:write`, `files:write`, `im:history`, `im:write`
-5. Install to Workspace
-6. Copy Bot User OAuth Token (`xoxb-...`) → `SLACK_BOT_TOKEN`
-7. Basic Information → App-Level Tokens → Generate (`connections:write`) → `SLACK_APP_TOKEN`
-
-#### WhatsApp
-1. Set `WHATSAPP_ENABLED=true` in `.env`
-2. Run the agent — it will print a QR code to the terminal
-3. Scan with WhatsApp mobile app (Linked Devices)
-
-### 4. Run
-
-```bash
-npm run dev          # Development (hot reload via tsx)
-npm run build && npm start   # Production
-```
-
-## Usage
-
-- **DM the bot** — responds to all direct messages
-- **Mention in a channel** — responds when @mentioned
-- **Send images** — attach images for vision-enabled models
-- Each user/channel gets its own persistent session
-
-### Commands
-
-Supported on all channels:
-
-| Command | Action |
-|---|---|
-| `/stop` | Cancel the current agent task |
-| `/reset` | Clear conversation history |
-| `/status` | Check if the agent is busy |
-| `/help` | Show available commands |
+Every component is one file. The agent core (`agent.ts`) orchestrates the LLM session, tools, error recovery, and streaming. Everything else plugs in.
 
 ### Tools
 
-**Built-in (Pi SDK):** `read`, `write`, `edit`, `bash`/`exec`, `list_dir`, `find`, `grep`
+| Tool         | What it does                                                  |
+| ------------ | ------------------------------------------------------------- |
+| `memory`     | Persistent store — survives across conversations              |
+| `web_search` | Brave Search API                                              |
+| `web_fetch`  | Fetch + parse HTML (Readability) or PDFs (pdf.js)             |
+| `browser`    | Puppeteer — screenshots, navigate, click, type, scroll        |
+| `file_ops`   | Download files from URLs                                      |
+| `cron`       | Schedule jobs — cron, intervals, one-shot reminders           |
+| _Built-in_   | `read`, `write`, `edit`, `bash`, `list_dir`, `find`, `grep`  |
 
-**Custom:**
-- **`memory`** — store, search, list, update, delete persistent memories
-- **`web_search`** — Brave Search API (requires `BRAVE_API_KEY`)
-- **`web_fetch`** — fetch & parse web pages (Readability) or PDFs (pdf.js)
-- **`browser`** — Puppeteer screenshots, navigation, click, type, scroll
-- **`file_ops`** — download files from URLs
-- **`reminder`** — cron or one-time scheduled tasks with timezone support
+### Workspace
 
-### Skills & Bootstrap Context
+```
+workspace/
+├── code/           # where coding tools operate (sandboxed if enabled)
+├── skills/         # drop .md files here → injected into system prompt
+├── memory/
+│   ├── MEMORY.md   # consolidated facts (auto-maintained)
+│   └── HISTORY.md  # event log (auto-maintained)
+├── AGENTS.md       # bootstrap context for every conversation
+└── TODO.md         # monitored by heartbeat for proactive follow-up
+```
 
-Customize agent behavior per workspace:
+## Project Structure
 
-- **Skills** — drop markdown files in `skills/` for specialized instructions
-- **Bootstrap context** — create `AGENTS.md` or `CLAUDE.md` in workspace root for project-wide instructions
+```
+src/
+├── index.ts          # entry point — channels, scheduler, heartbeat
+├── config.ts         # env loader
+├── agent.ts          # agent core — LLM session, retry, streaming
+├── prompt.ts         # system prompt builder
+├── memory.ts         # persistent memory store
+├── scheduler.ts      # cron / interval / one-shot with retry & concurrency
+├── heartbeat.ts      # proactive agent wake-up
+├── tools.ts          # tool registry
+├── agent/            # subsystems (compaction, consolidation, overflow recovery, …)
+├── tools/            # tool implementations (web-search, web-fetch, browser, …)
+├── sandbox/          # Docker sandbox for shell execution
+├── media/            # image processing
+└── channels/         # Discord, Slack, WhatsApp adapters
+```
+
+## How It Stays Reliable
+
+These are the production patterns that make the difference between a demo and a daily-driver:
+
+- **Memory consolidation** — after every N messages, an LLM pass extracts key facts into `MEMORY.md` and appends events to `HISTORY.md`. This prevents context overflow while preserving what matters.
+- **Scheduler reliability** — jobs persist to disk, retry with exponential backoff, respect concurrency limits, and auto-disable after repeated failures.
+- **Heartbeat stability** — state persists across restarts; a minimum-interval guard prevents rapid-fire on process restart.
+- **Context overflow recovery** — automatic retry (up to 3×) with memory flush, history trimming, and compaction.
+- **Session repair** — corrupted JSONL session files are detected and repaired on load.
+- **Tool safety** — all results are truncated (prevents context blowup) then images normalized (prevents API size errors).
 
 ## Docker Sandbox
 
-When `SANDBOX_ENABLED=true`, shell commands run inside an isolated Docker container:
-
-- **Security** — docker sandbox
-- **File sharing** — workspace is bind-mounted so host and container share files
-- **Scope** — per-session (`session`) or shared across all chats (`shared`)
-- **Lifecycle** — stale containers auto-pruned after 24h; config drift triggers recreation
-- **Limits** — configurable memory, CPU, and PID limits
-
-File tools (read/write/edit) still run on the host. Only shell execution is sandboxed.
+When `SANDBOX_ENABLED=true`, shell commands run inside an isolated Docker container. File tools still run on the host — only execution is sandboxed.
 
 <details>
-<summary>Sandbox environment variables</summary>
+<summary>Sandbox configuration</summary>
 
-| Variable | Default | Description |
-|---|---|---|
-| `SANDBOX_ENABLED` | `false` | Enable Docker sandboxing |
-| `SANDBOX_SCOPE` | `session` | `session` or `shared` |
-| `SANDBOX_IMAGE` | `node:22-slim` | Docker image |
-| `SANDBOX_NETWORK` | `none` | `none` (isolated) or `bridge` (internet) |
-| `SANDBOX_MEMORY` | — | Memory limit (e.g. `512m`) |
-| `SANDBOX_CPUS` | — | CPU limit (e.g. `1.0`) |
-| `SANDBOX_PIDS_LIMIT` | `256` | Max PIDs |
-| `SANDBOX_SETUP_COMMAND` | — | Post-creation shell command |
+| Variable                | Default        | Description                              |
+| ----------------------- | -------------- | ---------------------------------------- |
+| `SANDBOX_ENABLED`       | `false`        | Enable sandboxing                        |
+| `SANDBOX_SCOPE`         | `session`      | `session` (per-chat) or `shared`         |
+| `SANDBOX_IMAGE`         | `node:22-slim` | Docker image                             |
+| `SANDBOX_NETWORK`       | `none`         | `none` (isolated) or `bridge` (internet) |
+| `SANDBOX_MEMORY`        | —              | Memory limit (e.g. `512m`)               |
+| `SANDBOX_CPUS`          | —              | CPU limit (e.g. `1.0`)                   |
+| `SANDBOX_PIDS_LIMIT`    | `256`          | Max PIDs                                 |
+| `SANDBOX_SETUP_COMMAND` | —              | Post-creation setup command              |
 
 </details>
 
-## Internals
+<details>
+<summary>Advanced configuration (scheduler, heartbeat, consolidation)</summary>
 
-Key design decisions carried over from OpenClaw, distilled for clarity:
+| Variable                     | Default   | Description                                  |
+| ---------------------------- | --------- | -------------------------------------------- |
+| `CONSOLIDATION_ENABLED`      | `true`    | Enable memory consolidation                  |
+| `CONSOLIDATION_THRESHOLD`    | `50`      | Messages before consolidation triggers        |
+| `HEARTBEAT_ENABLED`          | `true`    | Enable proactive heartbeat                   |
+| `HEARTBEAT_INTERVAL_MS`      | `1800000` | Heartbeat interval (default 30 min)          |
+| `HEARTBEAT_MIN_INTERVAL_MS`  | `600000`  | Min gap between heartbeats (default 10 min)  |
+| `SCHEDULER_MAX_CONCURRENCY`  | `3`       | Max concurrent job executions                |
+| `SCHEDULER_JOB_TIMEOUT_MS`   | `300000`  | Per-job timeout (default 5 min)              |
+| `SCHEDULER_MAX_FAILURES`     | `5`       | Failures before auto-disabling a job         |
 
-- **Memory Consolidation**
-
-When conversation gets long, nano-openclaw automatically triggers an LLM-driven consolidation process (background task) to:
-1.  **Extract key facts** — updates `memory/MEMORY.md` (injected into future system prompts)
-2.  **Log events** — appends to `memory/HISTORY.md` (chronological log)
-
-This mimics human long-term memory formation, preventing context window overflow while retaining crucial information.
-
-- **Context overflow recovery** — automatic retry (up to 3 attempts) with memory flush, history sanitization, and compaction reserve tokens
-- **Tool wrappers** — all custom tool results pass through truncation (prevents context blowup) then image normalization (prevents API size errors)
-- **Session persistence** — JSONL files per user/channel with automatic repair of corrupted sessions
-- **Image normalization** — all images (inbound + tool-generated) resized to ≤2000px / 5MB, converted to JPEG/PNG
-
-### Pi SDK Integration
-
-Built on the [Pi SDK](https://github.com/nichochar/pi-sdk):
-- `@mariozechner/pi-agent-core` — core agent framework
-- `@mariozechner/pi-ai` — model streaming
-- `@mariozechner/pi-coding-agent` — built-in coding tools
-
-nano-openclaw wraps the SDK with custom system prompts, error recovery, tool result processing, and session event streaming.
+</details>
 
 ## Extending
 
-### Add a Channel
+Adding a channel or tool is one file each. No framework, no plugins, no magic.
 
-Implement the `Channel` interface in `src/channels/`:
+<details>
+<summary>Add a Channel</summary>
 
 ```typescript
+// src/channels/my-channel.ts
 import type { Channel, InboundMessage, OutboundMessage } from "./base.js";
 
 export class MyChannel implements Channel {
@@ -236,18 +193,20 @@ export class MyChannel implements Channel {
   async start(): Promise<void> { /* connect */ }
   async stop(): Promise<void> { /* disconnect */ }
   onMessage(handler: (msg: InboundMessage) => Promise<OutboundMessage | null>): void {
-    // Wire platform messages → handler
+    // wire platform events → handler
   }
 }
 ```
 
-Register it in `src/index.ts`.
+Register in `src/index.ts`.
 
-### Add a Tool
+</details>
 
-Create `src/tools/my-tool.ts`, export from `src/tools.ts`, register in `AgentRunner.buildCustomTools()`:
+<details>
+<summary>Add a Tool</summary>
 
 ```typescript
+// src/tools/my-tool.ts
 import type { NanoToolDefinition } from "./types.js";
 import { jsonTextResult } from "./types.js";
 
@@ -255,18 +214,22 @@ export function createMyTool(): NanoToolDefinition {
   return {
     name: "my_tool",
     label: "my_tool",
-    description: "What this tool does",
-    parameters: { type: "object", required: ["action"], properties: { /* ... */ } },
-    execute: async (_id, params) => {
-      return jsonTextResult({ status: "success" });
-    },
+    description: "What it does",
+    parameters: { type: "object", required: ["action"], properties: { /* … */ } },
+    execute: async (_id, params) => jsonTextResult({ status: "ok" }),
   };
 }
 ```
 
-## Scope
+Export from `src/tools.ts`, register in `AgentRunner.buildCustomTools()`.
 
-nano-openclaw focuses on the core agent loop and tooling. For gateway servers, multi-provider failover, plugins, subagents, and streaming responses, see the full [OpenClaw](https://github.com/openclaw/openclaw).
+</details>
+
+## Built On
+
+[Pi SDK](https://github.com/nichochar/pi-sdk) (`@mariozechner/pi-agent-core`, `pi-ai`, `pi-coding-agent`) — nano-openclaw wraps it with custom prompts, error recovery, tool processing, and session streaming.
+
+For the full system — gateway servers, multi-provider failover, plugins, subagents — see [OpenClaw](https://github.com/openclaw/openclaw).
 
 ## License
 

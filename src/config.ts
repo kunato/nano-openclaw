@@ -4,6 +4,9 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import type { SandboxConfig } from "./sandbox/types.js";
 import { defaultSandboxConfig, defaultSandboxDockerConfig } from "./sandbox/types.js";
+import type { HeartbeatConfig } from "./heartbeat.js";
+import { defaultHeartbeatConfig } from "./heartbeat.js";
+import type { SchedulerOptions } from "./scheduler.js";
 
 /** Resolve the repo-local workspace/ directory (sibling of src/). */
 function resolveDefaultWorkspaceDir(): string {
@@ -58,6 +61,8 @@ export interface NanoConfig {
   sandbox: SandboxConfig;
   channels: ChannelsConfig;
   consolidation: ConsolidationConfig;
+  heartbeat: HeartbeatConfig;
+  scheduler: SchedulerOptions;
 }
 
 function parseAllowList(envVar: string | undefined): string[] | undefined {
@@ -141,6 +146,31 @@ export function loadConfig(): NanoConfig {
     },
   };
 
+  // Heartbeat config
+  const heartbeat: HeartbeatConfig = {
+    ...defaultHeartbeatConfig,
+    enabled: process.env.HEARTBEAT_ENABLED !== "false" && process.env.HEARTBEAT_ENABLED !== "0",
+    intervalMs: process.env.HEARTBEAT_INTERVAL_MS
+      ? parseInt(process.env.HEARTBEAT_INTERVAL_MS, 10)
+      : defaultHeartbeatConfig.intervalMs,
+    minIntervalMs: process.env.HEARTBEAT_MIN_INTERVAL_MS
+      ? parseInt(process.env.HEARTBEAT_MIN_INTERVAL_MS, 10)
+      : defaultHeartbeatConfig.minIntervalMs,
+  };
+
+  // Scheduler options
+  const scheduler: SchedulerOptions = {
+    maxConcurrency: process.env.SCHEDULER_MAX_CONCURRENCY
+      ? parseInt(process.env.SCHEDULER_MAX_CONCURRENCY, 10)
+      : undefined,
+    jobTimeoutMs: process.env.SCHEDULER_JOB_TIMEOUT_MS
+      ? parseInt(process.env.SCHEDULER_JOB_TIMEOUT_MS, 10)
+      : undefined,
+    maxConsecutiveFailures: process.env.SCHEDULER_MAX_FAILURES
+      ? parseInt(process.env.SCHEDULER_MAX_FAILURES, 10)
+      : undefined,
+  };
+
   return {
     provider,
     modelId,
@@ -153,5 +183,7 @@ export function loadConfig(): NanoConfig {
     sandbox,
     channels,
     consolidation,
+    heartbeat,
+    scheduler,
   };
 }

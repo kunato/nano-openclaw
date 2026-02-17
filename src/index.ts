@@ -4,6 +4,7 @@ import { AgentRunner } from "./agent.js";
 import { DiscordChannel } from "./channels/discord.js";
 import { ChannelManager } from "./channels/manager.js";
 import { Scheduler } from "./scheduler.js";
+import { HeartbeatService } from "./heartbeat.js";
 import { removeAllSandboxContainers } from "./sandbox/index.js";
 
 async function main() {
@@ -68,11 +69,39 @@ async function main() {
         console.log(`[scheduler] Delivered agentTurn result to ${channelName}:${channelId}`);
       }
     }
-  });
+  }, config.scheduler);
 
   // Connect scheduler to agent (so the cron tool is available)
   agent.setScheduler(scheduler);
   await scheduler.start();
+
+  const schedulerStatus = scheduler.status();
+  if (schedulerStatus.total > 0) {
+    console.log(
+      `[scheduler] ${schedulerStatus.enabled} enabled / ${schedulerStatus.total} total jobs`,
+    );
+  }
+
+  // Initialize heartbeat service (proactive agent wake-up)
+  const heartbeat = new HeartbeatService({
+    config: config.heartbeat,
+    workspaceDir: config.workspaceDir,
+    agentDir: config.agentDir,
+    onHeartbeat: async (prompt) => {
+      // Run heartbeat through the agent, delivering to the first available channel
+      const firstChannel = channels.enabledNames[0];
+      if (!firstChannel) {
+        console.log("[heartbeat] No channels available for delivery");
+        return null;
+      }
+      const response = await agent.handleCronAgentTurn(
+        `heartbeat:${firstChannel}`,
+        prompt,
+      );
+      return response?.text ?? null;
+    },
+  });
+  await heartbeat.start();
 
   channels.onCommand(async (command, _args, sessionKey, _channelId) => {
     switch (command) {
@@ -130,6 +159,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     console.log("\nShutting down...");
+    heartbeat.stop();
     scheduler.stop();
     await channels.stopAll();
     if (config.sandbox.enabled) {
