@@ -1,7 +1,7 @@
 {
   "name": "nano-openclaw",
   "version": "0.1.0",
-  "description": "Minimal re-implementation of OpenClaw: Pi SDK agent + workspace + memory + Discord",
+  "description": "Minimal re-implementation of OpenClaw: Pi SDK agent + workspace + memory + multi-channel (Discord, WhatsApp, Slack)",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -14,8 +14,11 @@
     "@mariozechner/pi-ai": "0.52.12",
     "@mariozechner/pi-coding-agent": "0.52.12",
     "@mozilla/readability": "^0.6.0",
+    "@slack/bolt": "^4.1.0",
+    "@whiskeysockets/baileys": "^6.7.0",
     "discord.js": "^14.16.0",
     "dotenv": "^16.4.0",
+    "pdfjs-dist": "^4.9.0",
     "linkedom": "^0.18.0",
     "croner": "^9.0.0",
     "puppeteer": "^23.0.0",

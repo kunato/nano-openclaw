@@ -28,6 +28,8 @@ import type { Scheduler } from "./scheduler.js";
 import { buildSystemPrompt } from "./prompt.js";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { SandboxContext } from "./sandbox/types.js";
+import { resolveSandboxContext, createSandboxedExecTool } from "./sandbox/index.js";
 
 import {
   wrapToolWithImageNormalization,
@@ -50,6 +52,7 @@ import {
 import type { LoadedSkill } from "./agent/skills.js";
 import { sanitizeSessionHistory } from "./agent/history.js";
 import { repairSessionFileIfNeeded } from "./agent/session-repair.js";
+import { MemoryConsolidator } from "./agent/consolidation.js";
 
 const AGENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -61,10 +64,17 @@ export class AgentRunner {
   private scheduler?: Scheduler;
   private cachedSkills: LoadedSkill[] = [];
   private cachedBootstrapContext: string | null = null;
+  private sandboxContextCache = new Map<string, SandboxContext>();
+  private consolidator: MemoryConsolidator;
 
   constructor(config: NanoConfig) {
     this.config = config;
     this.memoryStore = new MemoryStore(config.workspaceDir);
+    this.consolidator = new MemoryConsolidator({
+      config: config.consolidation,
+      workspaceDir: config.workspaceDir,
+      agentDir: config.agentDir,
+    });
   }
 
   setScheduler(scheduler: Scheduler): void {
@@ -88,6 +98,7 @@ export class AgentRunner {
 
   async init(): Promise<void> {
     await fs.mkdir(this.config.workspaceDir, { recursive: true });
+    await fs.mkdir(this.config.codeDir, { recursive: true });
     await fs.mkdir(this.config.agentDir, { recursive: true });
     await this.memoryStore.load();
     await this.ensureAgentFiles();
@@ -97,12 +108,101 @@ export class AgentRunner {
     this.cachedBootstrapContext = await loadBootstrapContext(this.config.workspaceDir);
 
     console.log(`[agent] Workspace: ${this.config.workspaceDir}`);
+    console.log(`[agent] Code dir:  ${this.config.codeDir}`);
     console.log(
       `[agent] Model: ${this.config.provider}/${this.config.modelId}`,
     );
     console.log(
       `[agent] Web search: ${this.config.braveApiKey ? "enabled" : "disabled (no BRAVE_API_KEY)"}`,
     );
+    console.log(
+      `[agent] Sandbox: ${this.config.sandbox.enabled ? `enabled (scope=${this.config.sandbox.scope}, image=${this.config.sandbox.docker.image})` : "disabled"}`,
+    );
+  }
+
+  /**
+   * Resolve sandbox context for a session (creates/reuses Docker container).
+   * Caches per session key to avoid re-resolving on every message.
+   */
+  private async resolveSandbox(sessionKey: string): Promise<SandboxContext | null> {
+    if (!this.config.sandbox.enabled) return null;
+
+    const cached = this.sandboxContextCache.get(
+      this.config.sandbox.scope === "shared" ? "__shared__" : sessionKey,
+    );
+    if (cached) return cached;
+
+    const ctx = await resolveSandboxContext({
+      config: this.config.sandbox,
+      sessionKey,
+      workspaceDir: this.config.codeDir,
+    });
+    if (ctx) {
+      const cacheKey = this.config.sandbox.scope === "shared" ? "__shared__" : sessionKey;
+      this.sandboxContextCache.set(cacheKey, ctx);
+    }
+    return ctx;
+  }
+
+  /**
+   * Make a direct LLM API call for consolidation (bypasses Pi SDK session).
+   * Uses the Anthropic Messages API or OpenAI-compatible chat completions
+   * depending on the configured provider.
+   */
+  private async makeLlmCall(systemPrompt: string, userPrompt: string): Promise<string> {
+    if (this.config.provider === "anthropic") {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": this.config.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: this.config.modelId,
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userPrompt }],
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`Anthropic API error: ${res.status} ${await res.text()}`);
+      }
+      const data = (await res.json()) as {
+        content: Array<{ type: string; text?: string }>;
+      };
+      return data.content
+        .filter((b) => b.type === "text" && b.text)
+        .map((b) => b.text!)
+        .join("");
+    }
+
+    // OpenAI-compatible fallback
+    const baseUrl = this.config.provider === "openai"
+      ? "https://api.openai.com/v1"
+      : `https://api.${this.config.provider}.com/v1`;
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.config.modelId,
+        max_tokens: 4096,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`LLM API error: ${res.status} ${await res.text()}`);
+    }
+    const data = (await res.json()) as {
+      choices: Array<{ message: { content: string } }>;
+    };
+    return data.choices[0]?.message?.content ?? "";
   }
 
   private async ensureAgentFiles(): Promise<void> {
@@ -260,17 +360,32 @@ export class AgentRunner {
 
     ensureCompactionReserveTokens(settingsManager);
 
+    // Resolve sandbox context (creates Docker container if enabled)
+    const sandbox = await this.resolveSandbox(msg.sessionKey);
+
     // Custom tools
     const customTools = this.buildCustomTools(msg.sessionKey);
 
-    // Create agent session
+    // When sandbox is enabled, add the sandboxed exec tool and filter out
+    // the built-in bash/exec from codingTools (same pattern as OpenClaw's
+    // createOpenClawCodingTools which does: if tool.name === "bash" || "exec" → skip)
+    if (sandbox) {
+      customTools.push(createSandboxedExecTool(sandbox));
+    }
+    const tools = sandbox
+      ? (codingTools as unknown as Array<{ name: string }>).filter(
+          (t) => t.name !== "bash" && t.name !== "exec",
+        )
+      : codingTools;
+
+    // Create agent session — cwd is codeDir so coding tools operate in the isolated code directory
     const { session } = await createAgentSession({
-      cwd: this.config.workspaceDir,
+      cwd: this.config.codeDir,
       agentDir: this.config.agentDir,
       authStorage,
       modelRegistry,
       model,
-      tools: codingTools,
+      tools: tools as typeof codingTools,
       customTools: customTools as never[],
       sessionManager,
       settingsManager,
@@ -278,18 +393,35 @@ export class AgentRunner {
 
     session.agent.streamFn = streamSimple;
 
-    // Set system prompt with current time, skills, and bootstrap context
+    // Set system prompt with current time, skills, bootstrap context, and sandbox info
+    // Read persistent memory for injection into system prompt
+    const memoryContext = await this.consolidator.readMemory();
+
+    // Derive channel name from session key (e.g. "discord:dm:123" → "Discord")
+    const channelName = msg.sessionKey.split(":")[0] ?? "unknown";
+    const channelLabel = channelName.charAt(0).toUpperCase() + channelName.slice(1);
+
     const systemPrompt = buildSystemPrompt({
       workspaceDir: this.config.workspaceDir,
       hasWebSearch: Boolean(this.config.braveApiKey),
+      memoryContext: memoryContext ?? undefined,
       channelContext: [
-        "Platform: Discord",
+        `Platform: ${channelLabel}`,
         "User: " + msg.userName + " (ID: " + msg.userId + ")",
         msg.isGroup ? "Group chat" : "Direct message",
       ].join(" | "),
       skillsSection: formatSkillsForPrompt(this.cachedSkills),
       bootstrapContext: this.cachedBootstrapContext ?? undefined,
       currentTime: new Date().toISOString(),
+      sandbox: sandbox
+        ? {
+            containerName: sandbox.containerName,
+            workdir: sandbox.containerWorkdir,
+            image: sandbox.config.docker.image,
+            network: sandbox.config.docker.network,
+            readOnlyRoot: sandbox.config.docker.readOnlyRoot,
+          }
+        : undefined,
     });
     session.agent.setSystemPrompt(systemPrompt);
     // Override Pi SDK's internal prompt rebuilding
@@ -526,10 +658,44 @@ export class AgentRunner {
       // Exhausted all attempts
       return { text: "Error: Failed after multiple retry attempts." };
     } catch (err) {
+      // noop — falls through to the error handler below
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[agent] Unexpected error:`, err);
       return { text: `Error: ${errMsg}` };
     } finally {
+      // Run LLM-driven memory consolidation (non-blocking — errors are logged, not thrown)
+      try {
+        const allMessages = session.messages as Array<{ role?: string; content?: unknown }>;
+        if (Array.isArray(allMessages) && allMessages.length > 0) {
+          const shouldConsolidate = await this.consolidator.shouldConsolidate(
+            msg.sessionKey,
+            allMessages.length,
+          );
+          if (shouldConsolidate) {
+            const messagesForConsolidation = allMessages
+              .filter((m) => m.role && m.content)
+              .map((m) => ({
+                role: m.role as string,
+                content: typeof m.content === "string"
+                  ? m.content
+                  : JSON.stringify(m.content).slice(0, 2000),
+              }));
+
+            await this.consolidator.consolidate(
+              msg.sessionKey,
+              messagesForConsolidation,
+              allMessages.length,
+              this.makeLlmCall.bind(this),
+            );
+          }
+        }
+      } catch (consolidationErr) {
+        console.warn(
+          `[agent] Memory consolidation failed (non-critical):`,
+          consolidationErr instanceof Error ? consolidationErr.message : String(consolidationErr),
+        );
+      }
+
       this.activeAbortControllers.delete(msg.sessionKey);
       unsubscribe();
       session.dispose();

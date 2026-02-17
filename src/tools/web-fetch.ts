@@ -2,9 +2,53 @@ import type { NanoToolDefinition } from "./types.js";
 import { textResult, jsonTextResult } from "./types.js";
 
 const DEFAULT_MAX_CHARS = 50_000;
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+const PDF_MAX_PAGES = 100;
+const PDF_MAX_BYTES = 50 * 1024 * 1024; // 50 MB download cap for PDFs
+
+// Lazy-loaded pdfjs-dist (same approach as openclaw's src/media/input-files.ts)
+type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+
+async function loadPdfJs(): Promise<PdfJsModule> {
+  if (!pdfJsModulePromise) {
+    pdfJsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs").catch((err) => {
+      pdfJsModulePromise = null;
+      throw new Error(
+        `pdfjs-dist is required for PDF extraction: ${String(err)}`,
+      );
+    });
+  }
+  return pdfJsModulePromise;
+}
+
+async function extractPdfText(buffer: ArrayBuffer): Promise<{ text: string; numPages: number }> {
+  const { getDocument } = await loadPdfJs();
+  const pdf = await getDocument({
+    data: new Uint8Array(buffer),
+    useWorkerFetch: false,
+    isEvalSupported: false,
+  }).promise;
+
+  const maxPages = Math.min(pdf.numPages, PDF_MAX_PAGES);
+  const textParts: string[] = [];
+
+  for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items
+      .map((item) => ("str" in item ? String(item.str) : ""))
+      .filter(Boolean)
+      .join(" ");
+    if (pageText) {
+      textParts.push(pageText);
+    }
+  }
+
+  return { text: textParts.join("\n\n"), numPages: pdf.numPages };
+}
 
 function stripTags(html: string): string {
   return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
@@ -63,7 +107,7 @@ export function createWebFetchTool(): NanoToolDefinition {
     name: "web_fetch",
     label: "Web Fetch",
     description:
-      "Fetch a URL and extract its readable content as markdown or text. Use for reading documentation, articles, or any web page content.",
+      "Fetch a URL and extract its readable content. Supports HTML pages (extracted via Readability), PDF documents (text extraction), JSON, and plain text. For research papers (e.g. arXiv), fetch the PDF URL directly (e.g. https://arxiv.org/pdf/XXXX.XXXXX) for best results.",
     parameters: {
       type: "object",
       required: ["url"],
@@ -94,7 +138,7 @@ export function createWebFetchTool(): NanoToolDefinition {
           method: "GET",
           headers: {
             "User-Agent": DEFAULT_USER_AGENT,
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            Accept: "application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           },
           redirect: "follow",
           signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
@@ -112,11 +156,48 @@ export function createWebFetchTool(): NanoToolDefinition {
         }
 
         const contentType = res.headers.get("content-type") ?? "";
+        const normalizedCt = contentType.split(";")[0].trim().toLowerCase();
+
+        // ── PDF handling ─────────────────────────────────────────────
+        if (normalizedCt === "application/pdf" || rawUrl.match(/\.pdf(\?|#|$)/i)) {
+          const arrayBuf = await res.arrayBuffer();
+          if (arrayBuf.byteLength > PDF_MAX_BYTES) {
+            return jsonTextResult({
+              status: "error",
+              url: rawUrl,
+              error: `PDF too large: ${(arrayBuf.byteLength / 1024 / 1024).toFixed(1)} MB (limit: ${PDF_MAX_BYTES / 1024 / 1024} MB)`,
+            });
+          }
+          try {
+            const { text: pdfText, numPages } = await extractPdfText(arrayBuf);
+            let text = pdfText;
+            const isTruncated = text.length > maxChars;
+            if (isTruncated) {
+              text = text.slice(0, maxChars) + "\n\n[... truncated]";
+            }
+            return jsonTextResult({
+              url: rawUrl,
+              finalUrl: res.url !== rawUrl ? res.url : undefined,
+              contentType: "application/pdf",
+              extractor: "pdfjs",
+              numPages,
+              charCount: text.length,
+              truncated: isTruncated,
+              content: text,
+            });
+          } catch (pdfErr) {
+            return textResult(
+              `Error extracting PDF text from ${rawUrl}: ${pdfErr instanceof Error ? pdfErr.message : String(pdfErr)}`,
+            );
+          }
+        }
+
+        // ── Non-PDF: read as text ────────────────────────────────────
         const body = await res.text();
 
         // If it looks like HTML, extract readable content
         const isHtml =
-          contentType.includes("text/html") ||
+          normalizedCt.includes("text/html") ||
           body.trimStart().slice(0, 256).toLowerCase().startsWith("<!doctype") ||
           body.trimStart().slice(0, 256).toLowerCase().startsWith("<html");
 
@@ -127,6 +208,12 @@ export function createWebFetchTool(): NanoToolDefinition {
           const extracted = await extractReadable(body, rawUrl);
           text = extracted.text;
           title = extracted.title;
+        } else if (normalizedCt.includes("application/json")) {
+          try {
+            text = JSON.stringify(JSON.parse(body), null, 2);
+          } catch {
+            text = body;
+          }
         } else {
           text = body;
         }
@@ -141,7 +228,7 @@ export function createWebFetchTool(): NanoToolDefinition {
           url: rawUrl,
           finalUrl: res.url !== rawUrl ? res.url : undefined,
           title,
-          contentType: contentType.split(";")[0].trim(),
+          contentType: normalizedCt || undefined,
           charCount: text.length,
           truncated,
           content: text,

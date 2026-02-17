@@ -66,25 +66,46 @@ async function readSkillFile(filePath: string): Promise<string | null> {
 }
 
 /**
- * Load AGENTS.md / bootstrap context from workspace root.
- * OpenClaw loads these to customize agent behavior per project.
+ * Bootstrap files loaded from the workspace root.
+ * Follows nanobot's pattern: a set of well-known .md files that define
+ * agent behavior, personality, user profile, and tool docs.
+ * Each file is optional — missing files are silently skipped.
+ */
+const BOOTSTRAP_FILES = [
+  "AGENTS.md",
+  "SOUL.md",
+  "USER.md",
+  "TOOLS.md",
+  "IDENTITY.md",
+  "CLAUDE.md",
+  ".agents.md",
+];
+
+/**
+ * Load all bootstrap context files from the workspace root.
+ * Returns combined content with section headers, or null if none found.
  */
 export async function loadBootstrapContext(workspaceDir: string): Promise<string | null> {
-  const candidates = ["AGENTS.md", "CLAUDE.md", ".agents.md"];
-  for (const name of candidates) {
+  const parts: string[] = [];
+
+  for (const name of BOOTSTRAP_FILES) {
     const filePath = path.join(workspaceDir, name);
     try {
       const content = await fs.readFile(filePath, "utf-8");
       const trimmed = content.trim();
       if (trimmed) {
-        console.log("[skills] Loaded bootstrap context from " + name);
-        return trimmed;
+        parts.push(trimmed);
       }
     } catch {
-      // try next
+      // file doesn't exist — skip
     }
   }
-  return null;
+
+  if (parts.length === 0) return null;
+
+  const loaded = parts.length;
+  console.log(`[workspace] Loaded ${loaded} bootstrap file(s) from ${workspaceDir}`);
+  return parts.join("\n\n---\n\n");
 }
 
 /**

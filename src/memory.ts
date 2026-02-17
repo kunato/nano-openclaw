@@ -15,7 +15,7 @@ export class MemoryStore {
   private filePath: string;
 
   constructor(workspaceDir: string) {
-    this.filePath = path.join(workspaceDir, ".nano-openclaw", "memory.json");
+    this.filePath = path.join(workspaceDir, "memory", "memory.json");
   }
 
   async load(): Promise<void> {
