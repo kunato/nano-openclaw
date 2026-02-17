@@ -16,32 +16,32 @@
 | Capability | How |
 |---|---|
 | **Code with you** | ReAct agent loop — reads, writes, edits files, runs shell commands |
-| **Remember things** | Persistent memory across conversations (store, search, update, delete) |
-| **Browse the web** | Brave Search + Readability page parsing + Puppeteer browser automation |
+| **Remember things** | Persistent memory + LLM-based consolidation (`MEMORY.md`, `HISTORY.md`) |
+| **Browse the web** | Brave Search + Readability + PDF extraction + Puppeteer browser automation |
 | **Run on schedule** | Cron jobs and one-time reminders with timezone support |
-| **See images** | Vision support — send images in Discord, get screenshots from tools |
+| **See images** | Vision support — send images in Discord, Slack, or WhatsApp, get screenshots from tools |
 | **Execute safely** | Docker sandbox on code execution — production security in minimal code |
-| **Talk on Discord** | DMs, @mentions, per-user sessions, commands (`/stop`, `/reset`, `/status`) |
+| **Talk where you work** | Discord, Slack, and WhatsApp support (extensible via `Channel` interface) |
 | **Learn your project** | Skills (`skills/*.md`) and bootstrap context (`AGENTS.md`) |
 
 ## Architecture
 
 ```
-Discord message
-  → DiscordChannel
+Message (Discord / Slack / WhatsApp)
+  → ChannelManager
     → AgentRunner.handleMessage()
       → Pi SDK session.prompt()  ← ReAct loop (LLM ↔ tools)
         Built-in:  read, write, edit, bash, list_dir, find, grep
         Custom:    memory, web_search, web_fetch, browser, reminder, file_ops
       → extract response + images
-    → reply to Discord
+    → reply to Channel
 ```
 
 ### Project Structure
 
 ```
 src/
-├── index.ts                # Entry point — Discord bot + scheduler
+├── index.ts                # Entry point — loads enabled channels + scheduler
 ├── config.ts               # .env configuration loader
 ├── agent.ts                # Agent runner — Pi SDK wrapper, retry, streaming
 ├── prompt.ts               # System prompt builder
@@ -50,6 +50,7 @@ src/
 ├── tools.ts                # Custom tool registry
 ├── agent/                  # Agent subsystems
 │   ├── compaction.ts       #   Auto-compaction with reserve tokens
+│   ├── consolidation.ts    #   LLM-driven memory consolidation
 │   ├── context-overflow.ts #   Context error recovery & retry
 │   ├── history.ts          #   Session history sanitization
 │   ├── memory-flush.ts     #   Pre-compaction memory preservation
@@ -59,7 +60,7 @@ src/
 │   └── utils.ts            #   Tool metadata & response extraction
 ├── tools/                  # Individual tool implementations
 │   ├── web-search.ts       #   Brave web search
-│   ├── web-fetch.ts        #   Readability page fetching
+│   ├── web-fetch.ts        #   Readability + PDF fetching
 │   ├── browser.ts          #   Puppeteer browser automation
 │   ├── file-ops.ts         #   File download & management
 │   └── reminder.ts         #   Scheduled task tool
@@ -67,7 +68,10 @@ src/
 ├── media/                  # Image processing (sharp)
 └── channels/               # Extensible channel interface
     ├── base.ts             #   Channel interface
-    └── discord.ts          #   Discord implementation
+    ├── manager.ts          #   Multi-channel manager
+    ├── discord.ts          #   Discord implementation
+    ├── slack.ts            #   Slack implementation
+    └── whatsapp.ts         #   WhatsApp implementation (baileys)
 ```
 
 ## Quick Start
@@ -86,20 +90,39 @@ cp .env.example .env
 
 **Required:**
 - `MODEL_API_KEY` — Anthropic (or other provider) API key
-- `DISCORD_TOKEN` — Discord bot token
+- At least one channel configured:
+  - **Discord**: `DISCORD_TOKEN`
+  - **Slack**: `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`
+  - **WhatsApp**: `WHATSAPP_ENABLED=true`
 
 **Optional:**
-- `MODEL_PROVIDER` / `MODEL_ID` — defaults to `anthropic` / `claude-sonnet-4-20250514`
+- `MODEL_PROVIDER` — defaults to `anthropic` (currently the only supported provider)
+- `MODEL_ID` — defaults to `claude-sonnet-4-20250514`
 - `WORKSPACE_DIR` — agent workspace (defaults to repo's `workspace/` directory)
 - `BRAVE_API_KEY` — enables web search
 - `SANDBOX_ENABLED=true` — enables Docker sandboxing (see [Sandbox](#docker-sandbox) below)
 
-### 3. Create a Discord Bot
+### 3. Create a Bot
 
+#### Discord
 1. [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Bot
 2. Enable **Message Content Intent** under Privileged Gateway Intents
 3. Copy token → `DISCORD_TOKEN` in `.env`
 4. OAuth2 → URL Generator → `bot` scope + `Send Messages`, `Read Message History` → invite to server
+
+#### Slack
+1. [Slack API](https://api.slack.com/apps) → Create New App → From scratch
+2. **Socket Mode** → Enable Socket Mode
+3. **Event Subscriptions** → Enable → Subscribe to `message.channels`, `message.im`, `app_mention`
+4. **OAuth & Permissions** → Scopes: `app_mentions:read`, `channels:history`, `chat:write`, `files:write`, `im:history`, `im:write`
+5. Install to Workspace
+6. Copy Bot User OAuth Token (`xoxb-...`) → `SLACK_BOT_TOKEN`
+7. Basic Information → App-Level Tokens → Generate (`connections:write`) → `SLACK_APP_TOKEN`
+
+#### WhatsApp
+1. Set `WHATSAPP_ENABLED=true` in `.env`
+2. Run the agent — it will print a QR code to the terminal
+3. Scan with WhatsApp mobile app (Linked Devices)
 
 ### 4. Run
 
@@ -111,11 +134,13 @@ npm run build && npm start   # Production
 ## Usage
 
 - **DM the bot** — responds to all direct messages
-- **@mention in a server** — responds when mentioned
+- **Mention in a channel** — responds when @mentioned
 - **Send images** — attach images for vision-enabled models
 - Each user/channel gets its own persistent session
 
 ### Commands
+
+Supported on all channels:
 
 | Command | Action |
 |---|---|
@@ -131,7 +156,7 @@ npm run build && npm start   # Production
 **Custom:**
 - **`memory`** — store, search, list, update, delete persistent memories
 - **`web_search`** — Brave Search API (requires `BRAVE_API_KEY`)
-- **`web_fetch`** — fetch & parse web pages with Readability
+- **`web_fetch`** — fetch & parse web pages (Readability) or PDFs (pdf.js)
 - **`browser`** — Puppeteer screenshots, navigation, click, type, scroll
 - **`file_ops`** — download files from URLs
 - **`reminder`** — cron or one-time scheduled tasks with timezone support
@@ -175,6 +200,14 @@ File tools (read/write/edit) still run on the host. Only shell execution is sand
 
 Key design decisions carried over from OpenClaw, distilled for clarity:
 
+- **Memory Consolidation**
+
+When conversation gets long, nano-openclaw automatically triggers an LLM-driven consolidation process (background task) to:
+1.  **Extract key facts** — updates `memory/MEMORY.md` (injected into future system prompts)
+2.  **Log events** — appends to `memory/HISTORY.md` (chronological log)
+
+This mimics human long-term memory formation, preventing context window overflow while retaining crucial information.
+
 - **Context overflow recovery** — automatic retry (up to 3 attempts) with memory flush, history sanitization, and compaction reserve tokens
 - **Tool wrappers** — all custom tool results pass through truncation (prevents context blowup) then image normalization (prevents API size errors)
 - **Session persistence** — JSONL files per user/channel with automatic repair of corrupted sessions
@@ -207,6 +240,8 @@ export class MyChannel implements Channel {
   }
 }
 ```
+
+Register it in `src/index.ts`.
 
 ### Add a Tool
 
