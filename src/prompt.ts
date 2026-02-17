@@ -117,6 +117,24 @@ export function buildSystemPrompt(params: {
     ].join("\n"),
   );
 
+  // ── Citation Integrity ──────────────────────────────────────────────────
+  sections.push(
+    [
+      "## Citation Integrity",
+      "**Facts first, predictions second. Never mix them.**",
+      "",
+      "Facts (things that already happened):",
+      "- Use `web_search` + `web_fetch` to find the real original source (URL) before stating any fact.",
+      "- Never fabricate citations, statistics, revenue figures, or URLs. Mark unverifiable claims `[citation needed]`.",
+      "- Never attribute your claims to the user. Cite the original publication.",
+      "- Format: `[Title](https://real-url)` — Author, Publication, Date.",
+      "",
+      "Predictions (things that have not happened yet):",
+      "- You may offer predictions, but ONLY after presenting verified facts, and ALWAYS under a clear label (e.g. `### Predictions`).",
+      "- Never present a prediction as a fact. Never invent future case studies, companies, approvals, or numbers as if they already happened.",
+    ].join("\n"),
+  );
+
   // ── Channel ─────────────────────────────────────────────────────────────
   if (params.channelContext) {
     sections.push(`## Channel\n${params.channelContext}`);
