@@ -1,34 +1,60 @@
 # nano-openclaw
 
 A useful personal AI assistant doesn't need much. It needs to **remember** you, **reach** you where you are, **act** on your behalf, and **not break things**. That's it.
+[OpenClaw](https://github.com/openclaw/openclaw) proved what a next-generation personal AI agent looks like. **nano-openclaw** distills those patterns into **~4k lines of TypeScript** you can read in an afternoon, modify in a day, and run as your daily-driver assistant.
 
-[OpenClaw](https://github.com/openclaw/openclaw) proved what a next-generation personal AI agent looks like. **nano-openclaw** distills those patterns into **~4k lines of TypeScript** — every subsystem fits in a single file, the whole thing is readable in an afternoon, and it actually works as a daily-driver assistant.
+> **The "nano" philosophy:** not fewer features — fewer lines per feature. Every pattern here is production focused, just stripped to its essence.
 
-> **The "nano" philosophy:** not fewer features — fewer lines per feature. Every pattern here is production-grade, just stripped to its essence.
+> **Beta:** We try to **not break things** using best practices — but sometimes best practices don't cover everything. We're actively working to help with those edge cases.
 
-## What Makes a Useful Assistant
+## Why This Exists
 
-A personal assistant is only as good as its weakest link. Drop any one of these and the experience breaks:
+Most agent frameworks are black boxes. You install them, configure them, and hope they work. When something breaks or you need to customize behavior, you're reading through layers of abstraction trying to find where the actual logic lives.
 
-**1. It remembers you**
+nano-openclaw is the opposite. **Every subsystem fits in one file.** Memory consolidation is 234 lines. The scheduler is 453 lines. Discord integration is 157 lines. Want to understand context overflow recovery? Read `agent/context-overflow.ts` top-to-bottom in 5 minutes.
 
-Not just within a conversation — across all of them. nano-openclaw has a persistent memory tool (store/search/update/delete) plus automatic LLM-driven consolidation that distills long conversations into `MEMORY.md` (facts, injected into every prompt) and `HISTORY.md` (events, searchable on demand). You never have to repeat yourself.
+This isn't a toy or a proof-of-concept. It's a working assistant with all the production patterns you'd build yourself — persistent memory, multi-channel support, scheduled tasks, proactive behavior, sandboxed execution, error recovery — just implemented in the simplest way that actually works.
 
-**2. It reaches you where you are**
+**If you can read TypeScript, you can understand this. If you can understand it, you can build on it.**
 
-Discord, Slack, or WhatsApp — configure one or all. Each is a thin adapter (~150 lines) over a shared `Channel` interface. Adding a new platform is one file.
 
-**3. It acts, not just responds**
+---
 
-The agent can read/write/edit files, run shell commands, search the web, fetch and parse pages (HTML via Readability, PDFs via pdf.js), automate a browser, and download files. These aren't demos — they're the tools you actually need day-to-day.
+## Read the Code
 
-**4. It thinks ahead**
+This is the whole system. One concept, one file.
 
-A scheduler handles cron jobs, intervals, and one-shot reminders — with retry, backoff, and auto-disable so broken jobs don't spam you. A heartbeat service wakes the agent every 30 minutes to review workspace state (`MEMORY.md`, `HISTORY.md`, `TODO.md`) and take initiative without being asked.
+| You want to understand…          | Open this                    | What you'll find                                   |
+| -------------------------------- | ---------------------------- | -------------------------------------------------- |
+| How an agent thinks              | `agent.ts`                   | LLM session, ReAct loop, tool dispatch, streaming  |
+| How persistent memory works      | `memory.ts`                  | File-backed CRUD — store, search, update, delete   |
+| How long-term memory forms       | `agent/consolidation.ts`     | LLM extracts facts → `MEMORY.md`, events → `HISTORY.md` |
+| How scheduling works             | `scheduler.ts`               | Cron, intervals, one-shot — with retry & backoff   |
+| How an agent acts on its own     | `heartbeat.ts`               | Periodic wake-up, workspace review, initiative     |
+| How a chat platform connects     | `channels/discord.ts`        | ~150 lines: socket → message → agent → reply       |
+| How a tool is built              | `tools/web-fetch.ts`         | HTML + PDF parsing in one function                 |
+| How code runs safely             | `sandbox/`                   | Docker lifecycle, bind mounts, security limits     |
+| How the system prompt assembles  | `prompt.ts`                  | Skills, memory, context — one place                |
 
-**5. It doesn't break things**
+**If you can read these files, you understand the entire system.** From there, building on it is just following the same patterns.
 
-Shell commands run inside a Docker sandbox (optional but recommended). Context overflow is handled with automatic retry, memory flush, and history compaction. Corrupted sessions self-repair. Tool results are truncated and images normalized before hitting the API. The boring reliability work is done.
+---
+
+## What Makes It Useful
+
+A personal assistant is only as good as its weakest link. These are the things that actually matter:
+
+**It remembers you** — not just within a conversation, across all of them. Persistent memory tool + automatic LLM-driven consolidation that distills conversations into `MEMORY.md` (facts, injected into every prompt) and `HISTORY.md` (events). You never repeat yourself.
+
+**It reaches you where you are** — Discord, Slack, or WhatsApp. Each is a thin adapter over a shared `Channel` interface. Configure one or all.
+
+**It acts, not just responds** — read/write/edit files, run shell commands, search the web, fetch and parse pages (HTML + PDFs), automate a browser, download files. These are the tools you actually need day-to-day.
+
+**It thinks ahead** — a scheduler handles cron jobs, intervals, and one-shot reminders. A heartbeat service wakes the agent every 30 minutes to review workspace state and take initiative without being asked.
+
+**It tries not to break things** — Docker sandbox for code execution. Automatic context overflow recovery. Corrupted session self-repair. Tool result truncation and image normalization. The boring reliability work that separates a demo from a daily-driver.
+
+---
 
 ## Quick Start
 
@@ -38,10 +64,7 @@ cp .env.example .env    # set MODEL_API_KEY + at least one channel
 npm run dev
 ```
 
-**Required env vars:**
-
-- `MODEL_API_KEY` — Anthropic API key (`MODEL_PROVIDER` currently only supports `anthropic`)
-- At least one channel: `DISCORD_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, or `WHATSAPP_ENABLED=true`
+**Required:** `MODEL_API_KEY` (Anthropic — currently the only supported provider) + at least one channel (`DISCORD_TOKEN`, `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`, or `WHATSAPP_ENABLED=true`)
 
 **Optional:** `BRAVE_API_KEY` (web search), `SANDBOX_ENABLED=true` (Docker sandbox)
 
@@ -49,25 +72,24 @@ npm run dev
 <summary>Channel setup guides</summary>
 
 #### Discord
-
 1. [Developer Portal](https://discord.com/developers/applications) → New Application → Bot
 2. Enable **Message Content Intent**
 3. Copy token → `DISCORD_TOKEN`
 4. OAuth2 → `bot` scope + `Send Messages`, `Read Message History` → invite to server
 
 #### Slack
-
 1. [Slack API](https://api.slack.com/apps) → Create New App → Enable **Socket Mode**
 2. Event Subscriptions: `message.channels`, `message.im`, `app_mention`
 3. Scopes: `app_mentions:read`, `channels:history`, `chat:write`, `files:write`, `im:history`, `im:write`
 4. Install → copy `SLACK_BOT_TOKEN` (xoxb-…) and `SLACK_APP_TOKEN` (xapp-…)
 
 #### WhatsApp
-
 1. Set `WHATSAPP_ENABLED=true`
 2. Run the agent — scan the QR code with WhatsApp mobile
 
 </details>
+
+---
 
 ## Architecture
 
@@ -75,7 +97,7 @@ npm run dev
 You (Discord / Slack / WhatsApp)
   → Channel adapter → AgentRunner
     → LLM ↔ tools (ReAct loop)
-    → response → Channel adapter → You
+    → response → You
 
 Scheduler (cron / interval / one-shot)
   → fires job → AgentRunner → delivers to channel
@@ -84,19 +106,17 @@ Heartbeat (every 30 min)
   → reads workspace context → AgentRunner → proactive action
 ```
 
-Every component is one file. The agent core (`agent.ts`) orchestrates the LLM session, tools, error recovery, and streaming. Everything else plugs in.
-
 ### Tools
 
-| Tool         | What it does                                                  |
-| ------------ | ------------------------------------------------------------- |
-| `memory`     | Persistent store — survives across conversations              |
-| `web_search` | Brave Search API                                              |
-| `web_fetch`  | Fetch + parse HTML (Readability) or PDFs (pdf.js)             |
-| `browser`    | Puppeteer — screenshots, navigate, click, type, scroll        |
-| `file_ops`   | Download files from URLs                                      |
-| `cron`       | Schedule jobs — cron, intervals, one-shot reminders           |
-| _Built-in_   | `read`, `write`, `edit`, `bash`, `list_dir`, `find`, `grep`  |
+| Tool         | What it does                                                 |
+| ------------ | ------------------------------------------------------------ |
+| `memory`     | Persistent store — survives across conversations             |
+| `web_search` | Brave Search API                                             |
+| `web_fetch`  | Fetch + parse HTML (Readability) or PDFs (pdf.js)            |
+| `browser`    | Puppeteer — screenshots, navigate, click, type, scroll       |
+| `file_ops`   | Download files from URLs                                     |
+| `cron`       | Schedule jobs — cron, intervals, one-shot reminders          |
+| _Built-in_   | `read`, `write`, `edit`, `bash`, `list_dir`, `find`, `grep` |
 
 ### Workspace
 
@@ -111,75 +131,11 @@ workspace/
 └── TODO.md         # monitored by heartbeat for proactive follow-up
 ```
 
-## Project Structure
+---
 
-```
-src/
-├── index.ts          # entry point — channels, scheduler, heartbeat
-├── config.ts         # env loader
-├── agent.ts          # agent core — LLM session, retry, streaming
-├── prompt.ts         # system prompt builder
-├── memory.ts         # persistent memory store
-├── scheduler.ts      # cron / interval / one-shot with retry & concurrency
-├── heartbeat.ts      # proactive agent wake-up
-├── tools.ts          # tool registry
-├── agent/            # subsystems (compaction, consolidation, overflow recovery, …)
-├── tools/            # tool implementations (web-search, web-fetch, browser, …)
-├── sandbox/          # Docker sandbox for shell execution
-├── media/            # image processing
-└── channels/         # Discord, Slack, WhatsApp adapters
-```
+## Build On It
 
-## How It Stays Reliable
-
-These are the production patterns that make the difference between a demo and a daily-driver:
-
-- **Memory consolidation** — after every N messages, an LLM pass extracts key facts into `MEMORY.md` and appends events to `HISTORY.md`. This prevents context overflow while preserving what matters.
-- **Scheduler reliability** — jobs persist to disk, retry with exponential backoff, respect concurrency limits, and auto-disable after repeated failures.
-- **Heartbeat stability** — state persists across restarts; a minimum-interval guard prevents rapid-fire on process restart.
-- **Context overflow recovery** — automatic retry (up to 3×) with memory flush, history trimming, and compaction.
-- **Session repair** — corrupted JSONL session files are detected and repaired on load.
-- **Tool safety** — all results are truncated (prevents context blowup) then images normalized (prevents API size errors).
-
-## Docker Sandbox
-
-When `SANDBOX_ENABLED=true`, shell commands run inside an isolated Docker container. File tools still run on the host — only execution is sandboxed.
-
-<details>
-<summary>Sandbox configuration</summary>
-
-| Variable                | Default        | Description                              |
-| ----------------------- | -------------- | ---------------------------------------- |
-| `SANDBOX_ENABLED`       | `false`        | Enable sandboxing                        |
-| `SANDBOX_SCOPE`         | `session`      | `session` (per-chat) or `shared`         |
-| `SANDBOX_IMAGE`         | `node:22-slim` | Docker image                             |
-| `SANDBOX_NETWORK`       | `none`         | `none` (isolated) or `bridge` (internet) |
-| `SANDBOX_MEMORY`        | —              | Memory limit (e.g. `512m`)               |
-| `SANDBOX_CPUS`          | —              | CPU limit (e.g. `1.0`)                   |
-| `SANDBOX_PIDS_LIMIT`    | `256`          | Max PIDs                                 |
-| `SANDBOX_SETUP_COMMAND` | —              | Post-creation setup command              |
-
-</details>
-
-<details>
-<summary>Advanced configuration (scheduler, heartbeat, consolidation)</summary>
-
-| Variable                     | Default   | Description                                  |
-| ---------------------------- | --------- | -------------------------------------------- |
-| `CONSOLIDATION_ENABLED`      | `true`    | Enable memory consolidation                  |
-| `CONSOLIDATION_THRESHOLD`    | `50`      | Messages before consolidation triggers        |
-| `HEARTBEAT_ENABLED`          | `true`    | Enable proactive heartbeat                   |
-| `HEARTBEAT_INTERVAL_MS`      | `1800000` | Heartbeat interval (default 30 min)          |
-| `HEARTBEAT_MIN_INTERVAL_MS`  | `600000`  | Min gap between heartbeats (default 10 min)  |
-| `SCHEDULER_MAX_CONCURRENCY`  | `3`       | Max concurrent job executions                |
-| `SCHEDULER_JOB_TIMEOUT_MS`   | `300000`  | Per-job timeout (default 5 min)              |
-| `SCHEDULER_MAX_FAILURES`     | `5`       | Failures before auto-disabling a job         |
-
-</details>
-
-## Extending
-
-Adding a channel or tool is one file each. No framework, no plugins, no magic.
+You've read the code. Now extend it — one file per channel, one file per tool, same patterns throughout.
 
 <details>
 <summary>Add a Channel</summary>
@@ -224,6 +180,76 @@ export function createMyTool(): NanoToolDefinition {
 Export from `src/tools.ts`, register in `AgentRunner.buildCustomTools()`.
 
 </details>
+
+---
+
+## Production Patterns
+
+The reliability details that make this a daily-driver, not a demo:
+
+- **Memory consolidation** — every N messages, an LLM pass extracts key facts into `MEMORY.md` and appends events to `HISTORY.md`. Prevents context overflow while preserving what matters.
+- **Scheduler reliability** — jobs persist to disk, retry with exponential backoff, respect concurrency limits, auto-disable after repeated failures.
+- **Heartbeat stability** — state persists across restarts; minimum-interval guard prevents rapid-fire on process restart.
+- **Context overflow recovery** — automatic retry (up to 3×) with memory flush, history trimming, and compaction.
+- **Session repair** — corrupted JSONL session files detected and repaired on load.
+- **Tool safety** — results truncated (prevents context blowup), images normalized (prevents API size errors).
+- **Docker sandbox** — when `SANDBOX_ENABLED=true`, shell commands run in an isolated container. File tools stay on host.
+
+<details>
+<summary>Sandbox configuration</summary>
+
+| Variable                | Default        | Description                              |
+| ----------------------- | -------------- | ---------------------------------------- |
+| `SANDBOX_ENABLED`       | `false`        | Enable sandboxing                        |
+| `SANDBOX_SCOPE`         | `session`      | `session` (per-chat) or `shared`         |
+| `SANDBOX_IMAGE`         | `node:22-slim` | Docker image                             |
+| `SANDBOX_NETWORK`       | `none`         | `none` (isolated) or `bridge` (internet) |
+| `SANDBOX_MEMORY`        | —              | Memory limit (e.g. `512m`)               |
+| `SANDBOX_CPUS`          | —              | CPU limit (e.g. `1.0`)                   |
+| `SANDBOX_PIDS_LIMIT`    | `256`          | Max PIDs                                 |
+| `SANDBOX_SETUP_COMMAND` | —              | Post-creation setup command              |
+
+</details>
+
+<details>
+<summary>Advanced configuration (scheduler, heartbeat, consolidation)</summary>
+
+| Variable                     | Default   | Description                                  |
+| ---------------------------- | --------- | -------------------------------------------- |
+| `CONSOLIDATION_ENABLED`      | `true`    | Enable memory consolidation                  |
+| `CONSOLIDATION_THRESHOLD`    | `50`      | Messages before consolidation triggers       |
+| `HEARTBEAT_ENABLED`          | `true`    | Enable proactive heartbeat                   |
+| `HEARTBEAT_INTERVAL_MS`      | `1800000` | Heartbeat interval (default 30 min)          |
+| `HEARTBEAT_MIN_INTERVAL_MS`  | `600000`  | Min gap between heartbeats (default 10 min)  |
+| `SCHEDULER_MAX_CONCURRENCY`  | `3`       | Max concurrent job executions                |
+| `SCHEDULER_JOB_TIMEOUT_MS`   | `300000`  | Per-job timeout (default 5 min)              |
+| `SCHEDULER_MAX_FAILURES`     | `5`       | Failures before auto-disabling a job         |
+
+</details>
+
+<details>
+<summary>Full project structure</summary>
+
+```
+src/
+├── index.ts          # entry point — channels, scheduler, heartbeat
+├── config.ts         # env loader
+├── agent.ts          # agent core — LLM session, retry, streaming
+├── prompt.ts         # system prompt builder
+├── memory.ts         # persistent memory store
+├── scheduler.ts      # cron / interval / one-shot with retry & concurrency
+├── heartbeat.ts      # proactive agent wake-up
+├── tools.ts          # tool registry
+├── agent/            # subsystems (compaction, consolidation, overflow recovery, …)
+├── tools/            # tool implementations (web-search, web-fetch, browser, …)
+├── sandbox/          # Docker sandbox for shell execution
+├── media/            # image processing
+└── channels/         # Discord, Slack, WhatsApp adapters
+```
+
+</details>
+
+---
 
 ## Built On
 
