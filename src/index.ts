@@ -6,6 +6,7 @@ import { ChannelManager } from "./channels/manager.js";
 import { Scheduler } from "./scheduler.js";
 import { HeartbeatService } from "./heartbeat.js";
 import { removeAllSandboxContainers } from "./sandbox/index.js";
+import { buildAnnounceMessage } from "./subagent.js";
 
 async function main() {
   console.log("nano-openclaw starting...");
@@ -73,6 +74,56 @@ async function main() {
 
   // Connect scheduler to agent (so the cron tool is available)
   agent.setScheduler(scheduler);
+
+  // Wire subagent announce callback: when a child subagent completes,
+  // inject its result back into the parent session and deliver to the channel.
+  agent.setAnnounceCallback(async (params) => {
+    const registry = agent.getSubagentRegistry();
+    const remainingActive = registry.countActiveForSession(params.parentSessionKey);
+
+    const announceText = buildAnnounceMessage({
+      task: params.task,
+      label: params.label,
+      status: params.status,
+      result: params.result,
+      startedAt: params.startedAt,
+      endedAt: params.endedAt,
+      remainingActiveChildren: remainingActive,
+    });
+
+    console.log(
+      `[subagent] Announcing result for "${params.label || params.task.slice(0, 40)}" to ${params.parentSessionKey}`,
+    );
+
+    // Inject the announce as a new message into the parent agent session
+    const response = await agent.handleMessage({
+      text: announceText,
+      sessionKey: params.parentSessionKey,
+      channelId: params.parentChannelId,
+      userId: "system",
+      userName: "subagent-announce",
+      isGroup: false,
+    }, {});
+
+    // Deliver response to the appropriate channel
+    if (response?.text && response.text !== "NO_REPLY") {
+      const parts = params.parentSessionKey.split(":");
+      const channelName = parts[0] || "discord";
+      const channelId = parts[parts.length - 1];
+      if (channelId) {
+        const targetChannel = channels.get(channelName);
+        if (targetChannel && "sendToChannel" in targetChannel) {
+          const images = response.images?.map((img) => ({
+            data: img.data,
+            name: img.name,
+          }));
+          await (targetChannel as { sendToChannel: (id: string, text: string, images?: unknown) => Promise<void> }).sendToChannel(channelId, response.text, images);
+          console.log(`[subagent] Delivered announce response to ${channelName}:${channelId}`);
+        }
+      }
+    }
+  });
+
   await scheduler.start();
 
   const schedulerStatus = scheduler.status();

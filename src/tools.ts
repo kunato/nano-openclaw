@@ -8,6 +8,7 @@ export { createWebFetchTool } from "./tools/web-fetch.js";
 export { createReminderTool } from "./tools/reminder.js";
 export { createBrowserTool } from "./tools/browser.js";
 export { createFileOpsTool } from "./tools/file-ops.js";
+export { createSubagentTool } from "./tools/subagent.js";
 
 export function createMemoryTool(store: MemoryStore): NanoToolDefinition {
   return {

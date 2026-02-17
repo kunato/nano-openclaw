@@ -5,3 +5,4 @@ export { createWebFetchTool } from "./web-fetch.js";
 export { createReminderTool } from "./reminder.js";
 export { createBrowserTool } from "./browser.js";
 export { createFileOpsTool } from "./file-ops.js";
+export { createSubagentTool } from "./subagent.js";

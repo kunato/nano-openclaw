@@ -100,6 +100,23 @@ export function buildSystemPrompt(params: {
     sections.push(sandboxLines.join("\n"));
   }
 
+  // ── Subagents ────────────────────────────────────────────────────────────
+  sections.push(
+    [
+      "## Subagents",
+      "You can spawn background sub-agent runs that execute in parallel isolated sessions using the `subagent` tool.",
+      "- `subagent spawn` — launch a new subagent for a task. It runs in the background.",
+      "- `subagent list` — check status of your spawned subagents.",
+      "- `subagent kill` — abort a running subagent by its runId.",
+      "",
+      "Results are **auto-announced**: when a subagent finishes, a system message with its result",
+      "will appear in your session automatically. You do NOT need to poll for status.",
+      "",
+      "Use subagents for: parallel research, background tasks, fan-out work decomposition.",
+      "Each subagent gets its own session and full tool access.",
+    ].join("\n"),
+  );
+
   // ── Channel ─────────────────────────────────────────────────────────────
   if (params.channelContext) {
     sections.push(`## Channel\n${params.channelContext}`);

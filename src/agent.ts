@@ -26,6 +26,15 @@ import {
 import type { NanoToolDefinition } from "./tools.js";
 import type { Scheduler } from "./scheduler.js";
 import { buildSystemPrompt } from "./prompt.js";
+import {
+  SubagentRegistry,
+  buildSubagentSystemPrompt,
+  buildAnnounceMessage,
+  MAX_SPAWN_DEPTH,
+  type AnnounceCallback,
+} from "./subagent.js";
+import { createSubagentTool } from "./tools/subagent.js";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { SandboxContext } from "./sandbox/types.js";
@@ -66,6 +75,8 @@ export class AgentRunner {
   private cachedBootstrapContext: string | null = null;
   private sandboxContextCache = new Map<string, SandboxContext>();
   private consolidator: MemoryConsolidator;
+  private subagentRegistry: SubagentRegistry;
+  private announceCallback?: AnnounceCallback;
 
   constructor(config: NanoConfig) {
     this.config = config;
@@ -75,10 +86,118 @@ export class AgentRunner {
       workspaceDir: config.workspaceDir,
       agentDir: config.agentDir,
     });
+    this.subagentRegistry = new SubagentRegistry(config.agentDir);
   }
 
   setScheduler(scheduler: Scheduler): void {
     this.scheduler = scheduler;
+  }
+
+  setAnnounceCallback(callback: AnnounceCallback): void {
+    this.announceCallback = callback;
+  }
+
+  getSubagentRegistry(): SubagentRegistry {
+    return this.subagentRegistry;
+  }
+
+  /**
+   * Spawn a background subagent that runs in an isolated session.
+   * The result is auto-announced back to the parent session when complete.
+   */
+  async spawnSubagent(params: {
+    task: string;
+    parentSessionKey: string;
+    parentChannelId: string;
+    label?: string;
+  }): Promise<{ runId: string; childSessionKey: string }> {
+    const runId = randomUUID();
+    const childSessionKey = `subagent:${runId.slice(0, 8)}`;
+    const parentDepth = this.subagentRegistry.getDepthForSession(params.parentSessionKey);
+    const childDepth = parentDepth + 1;
+
+    // Register the run before starting
+    this.subagentRegistry.register({
+      runId,
+      childSessionKey,
+      parentSessionKey: params.parentSessionKey,
+      parentChannelId: params.parentChannelId,
+      task: params.task,
+      label: params.label,
+      depth: childDepth,
+      status: "running",
+      createdAt: Date.now(),
+    });
+
+    const startedAt = Date.now();
+
+    // Fire-and-forget: run the subagent in the background
+    const run = async () => {
+      const childSystemPrompt = buildSubagentSystemPrompt({
+        parentSessionKey: params.parentSessionKey,
+        childSessionKey,
+        task: params.task,
+        label: params.label,
+        depth: childDepth,
+        maxDepth: MAX_SPAWN_DEPTH,
+      });
+
+      const msg: InboundMessage = {
+        text: params.task,
+        sessionKey: childSessionKey,
+        channelId: params.parentChannelId,
+        userId: "system",
+        userName: "parent-agent",
+        isGroup: false,
+      };
+
+      let resultText: string;
+      let status: "ok" | "error";
+      try {
+        const response = await this._handleMessage(msg, {}, { extraSystemPrompt: childSystemPrompt });
+        resultText = response?.text || "(no output)";
+        status = "ok";
+      } catch (err) {
+        resultText = err instanceof Error ? err.message : String(err);
+        status = "error";
+      }
+
+      const endedAt = Date.now();
+      this.subagentRegistry.markComplete(runId, resultText, status);
+
+      console.log(
+        `[subagent] ${params.label || runId.slice(0, 8)} ${status} in ${Math.round((endedAt - startedAt) / 1000)}s`,
+      );
+
+      // Announce result back to parent session
+      if (this.announceCallback) {
+        try {
+          await this.announceCallback({
+            parentSessionKey: params.parentSessionKey,
+            parentChannelId: params.parentChannelId,
+            runId,
+            label: params.label,
+            task: params.task,
+            status,
+            result: resultText,
+            startedAt,
+            endedAt,
+          });
+        } catch (announceErr) {
+          console.error(
+            `[subagent] Announce failed for ${runId}:`,
+            announceErr instanceof Error ? announceErr.message : String(announceErr),
+          );
+        }
+      }
+    };
+
+    run().catch((err) => {
+      console.error(`[subagent] Fatal error in ${runId}:`, err);
+      this.subagentRegistry.markComplete(runId, String(err), "error");
+    });
+
+    return { runId, childSessionKey };
   }
 
   /**
@@ -101,6 +220,7 @@ export class AgentRunner {
     await fs.mkdir(this.config.codeDir, { recursive: true });
     await fs.mkdir(this.config.agentDir, { recursive: true });
     await this.memoryStore.load();
+    await this.subagentRegistry.load();
     await this.ensureAgentFiles();
 
     // Load skills and bootstrap context from workspace
@@ -226,7 +346,7 @@ export class AgentRunner {
     return path.join(this.config.agentDir, "sessions", `${safe}.jsonl`);
   }
 
-  private buildCustomTools(sessionKey: string): NanoToolDefinition[] {
+  private buildCustomTools(sessionKey: string, channelId?: string): NanoToolDefinition[] {
     const tools: NanoToolDefinition[] = [];
 
     tools.push(createMemoryTool(this.memoryStore));
@@ -251,6 +371,16 @@ export class AgentRunner {
       createFileOpsTool({
         downloadDir: path.join(this.config.agentDir, "downloads"),
       }),
+    );
+
+    // Subagent tool — allows spawning parallel background agent runs
+    tools.push(
+      createSubagentTool(
+        this.subagentRegistry,
+        this.spawnSubagent.bind(this),
+        sessionKey,
+        channelId || "unknown",
+      ),
     );
 
     // Wrap all tools: truncate large text results (prevents context overflow)
@@ -313,6 +443,7 @@ export class AgentRunner {
   private async _handleMessage(
     msg: InboundMessage,
     stream: StreamCallbacks,
+    opts?: { extraSystemPrompt?: string },
   ): Promise<OutboundMessage | null> {
     const sessionFile = this.resolveSessionFile(msg.sessionKey);
     await fs.mkdir(path.dirname(sessionFile), { recursive: true });
@@ -364,7 +495,7 @@ export class AgentRunner {
     const sandbox = await this.resolveSandbox(msg.sessionKey);
 
     // Custom tools
-    const customTools = this.buildCustomTools(msg.sessionKey);
+    const customTools = this.buildCustomTools(msg.sessionKey, msg.channelId);
 
     // When sandbox is enabled, add the sandboxed exec tool and filter out
     // the built-in bash/exec from codingTools (same pattern as OpenClaw's
@@ -423,14 +554,19 @@ export class AgentRunner {
           }
         : undefined,
     });
-    session.agent.setSystemPrompt(systemPrompt);
+    // Append extra system prompt for subagent context
+    const finalSystemPrompt = opts?.extraSystemPrompt
+      ? systemPrompt + "\n\n---\n\n" + opts.extraSystemPrompt
+      : systemPrompt;
+    // Set Pi system prompt
+    session.agent.setSystemPrompt(finalSystemPrompt);
     // Override Pi SDK's internal prompt rebuilding
     const mutableSession = session as unknown as {
       _baseSystemPrompt?: string;
       _rebuildSystemPrompt?: (toolNames: string[]) => string;
     };
-    mutableSession._baseSystemPrompt = systemPrompt;
-    mutableSession._rebuildSystemPrompt = () => systemPrompt;
+    mutableSession._baseSystemPrompt = finalSystemPrompt;
+    mutableSession._rebuildSystemPrompt = () => finalSystemPrompt;
 
     // Subscribe to session events for streaming feedback
     const collectedImages: ImageAttachment[] = [];
@@ -591,6 +727,7 @@ export class AgentRunner {
         let promptError: string | undefined;
 
         try {
+          // Run actual prompt [Run agent loop until error / stop]
           if (promptImages.length > 0) {
             await session.prompt(msg.text, { images: promptImages });
           } else {
