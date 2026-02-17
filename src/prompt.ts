@@ -1,4 +1,5 @@
 import os from "node:os";
+import type { CitationsMode } from "./config.js";
 
 /**
  * Build the system prompt from workspace bootstrap files + runtime context.
@@ -15,6 +16,7 @@ export function buildSystemPrompt(params: {
   bootstrapContext?: string;
   currentTime?: string;
   memoryContext?: string;
+  citationsMode?: CitationsMode;
   sandbox?: {
     containerName: string;
     workdir: string;
@@ -117,6 +119,9 @@ export function buildSystemPrompt(params: {
     ].join("\n"),
   );
 
+  // ── Memory Recall ────────────────────────────────────────────────────────
+  sections.push(buildMemoryRecallSection(params.citationsMode));
+
   // ── Citation Integrity ──────────────────────────────────────────────────
   sections.push(
     [
@@ -141,4 +146,36 @@ export function buildSystemPrompt(params: {
   }
 
   return sections.join("\n\n---\n\n");
+}
+
+/**
+ * Build the Memory Recall section of the system prompt.
+ * Adapts citation instructions based on the configured mode.
+ */
+function buildMemoryRecallSection(citationsMode?: CitationsMode): string {
+  const lines = [
+    "## Memory Recall",
+    "Before answering anything about prior work, decisions, dates, people, preferences, or todos:",
+    "1. Run `memory_search` to find relevant snippets across MEMORY.md, HISTORY.md, and other memory files.",
+    "2. Use `memory_get` to pull only the needed lines and keep context small.",
+    "3. If low confidence after search, say you checked but found nothing definitive.",
+    "",
+    "The `memory` tool manages structured key-value memories (JSON store).",
+    "The `memory_search` / `memory_get` tools search and read the markdown memory files written by consolidation.",
+    "Use both systems as appropriate.",
+  ];
+
+  if (citationsMode === "off") {
+    lines.push(
+      "",
+      "Memory citations are disabled: do not mention file paths or line numbers from memory in replies unless the user explicitly asks.",
+    );
+  } else {
+    lines.push(
+      "",
+      "Memory citations: when referencing recalled information, include `Source: <path>#L<start>-L<end>` so the user can verify the memory snippet.",
+    );
+  }
+
+  return lines.join("\n");
 }

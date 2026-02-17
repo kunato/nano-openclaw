@@ -22,6 +22,8 @@ import {
   createReminderTool,
   createBrowserTool,
   createFileOpsTool,
+  createMemorySearchTool,
+  createMemoryGetTool,
 } from "./tools.js";
 import type { NanoToolDefinition } from "./tools.js";
 import type { Scheduler } from "./scheduler.js";
@@ -350,6 +352,17 @@ export class AgentRunner {
     const tools: NanoToolDefinition[] = [];
 
     tools.push(createMemoryTool(this.memoryStore));
+
+    // Citation-aware memory search + get tools (search across memory/*.md files)
+    tools.push(
+      createMemorySearchTool({
+        workspaceDir: this.config.workspaceDir,
+        citationsMode: this.config.consolidation.citations,
+        sessionKey,
+      }),
+    );
+    tools.push(createMemoryGetTool({ workspaceDir: this.config.workspaceDir }));
+
     tools.push(createWebFetchTool());
 
     if (this.config.braveApiKey) {
@@ -536,6 +549,7 @@ export class AgentRunner {
       workspaceDir: this.config.workspaceDir,
       hasWebSearch: Boolean(this.config.braveApiKey),
       memoryContext: memoryContext ?? undefined,
+      citationsMode: this.config.consolidation.citations,
       channelContext: [
         `Platform: ${channelLabel}`,
         "User: " + msg.userName + " (ID: " + msg.userId + ")",

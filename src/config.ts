@@ -41,11 +41,15 @@ export interface ChannelsConfig {
   slack: SlackConfig;
 }
 
+export type CitationsMode = "auto" | "on" | "off";
+
 export interface ConsolidationConfig {
   /** Enable LLM-driven memory consolidation. */
   enabled: boolean;
   /** Number of messages since last consolidation before triggering. */
   messageThreshold: number;
+  /** Citation mode for memory search results: "auto" (DMs=on, groups=off), "on", "off". */
+  citations: CitationsMode;
 }
 
 export interface NanoConfig {
@@ -126,6 +130,7 @@ export function loadConfig(): NanoConfig {
     messageThreshold: process.env.CONSOLIDATION_THRESHOLD
       ? parseInt(process.env.CONSOLIDATION_THRESHOLD, 10)
       : 50,
+    citations: (process.env.CITATIONS_MODE as ConsolidationConfig["citations"]) || "auto",
   };
 
   // Sandbox config from environment

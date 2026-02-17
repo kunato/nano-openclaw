@@ -9,6 +9,8 @@ export { createReminderTool } from "./tools/reminder.js";
 export { createBrowserTool } from "./tools/browser.js";
 export { createFileOpsTool } from "./tools/file-ops.js";
 export { createSubagentTool } from "./tools/subagent.js";
+export { createMemorySearchTool } from "./tools/memory-search.js";
+export { createMemoryGetTool } from "./tools/memory-get.js";
 
 export function createMemoryTool(store: MemoryStore): NanoToolDefinition {
   return {
