@@ -28,6 +28,7 @@ import {
 import type { NanoToolDefinition } from "./tools.js";
 import type { Scheduler } from "./scheduler.js";
 import { buildSystemPrompt } from "./prompt.js";
+import { postProcessCitations } from "./agent/citations.js";
 import {
   SubagentRegistry,
   buildSubagentSystemPrompt,
@@ -529,6 +530,7 @@ export class AgentRunner {
       authStorage,
       modelRegistry,
       model,
+      thinkingLevel: this.config.thinkingLevel as "off" | "minimal" | "low" | "medium" | "high",
       tools: tools as typeof codingTools,
       customTools: customTools as never[],
       sessionManager,
@@ -775,8 +777,19 @@ export class AgentRunner {
 
           const { text, images } = extractAssistantResponse(session.messages);
           const allImages = [...collectedImages, ...images];
+
+          // Post-process citations in the final response
+          const processedText = text
+            ? await postProcessCitations({
+                text,
+                citationsMode: this.config.consolidation.citations,
+                workspaceDir: this.config.workspaceDir,
+                isGroup: msg.isGroup,
+              })
+            : "(no text response)";
+
           return {
-            text: text || "(no text response)",
+            text: processedText,
             images: allImages.length > 0 ? allImages : undefined,
           };
         }

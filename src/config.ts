@@ -67,6 +67,8 @@ export interface NanoConfig {
   consolidation: ConsolidationConfig;
   heartbeat: HeartbeatConfig;
   scheduler: SchedulerOptions;
+  /** Pi SDK thinking level for models that support extended thinking. */
+  thinkingLevel: string;
 }
 
 function parseAllowList(envVar: string | undefined): string[] | undefined {
@@ -93,6 +95,7 @@ export function loadConfig(): NanoConfig {
     path.join(os.homedir(), ".nano-openclaw");
 
   const braveApiKey = process.env.BRAVE_API_KEY?.trim() || undefined;
+  const thinkingLevel = process.env.THINKING_LEVEL?.trim() || "low";
   const puppeteerExecutable = process.env.PUPPETEER_EXECUTABLE?.trim() || undefined;
 
   // Channel configs — each channel is optional
@@ -190,5 +193,6 @@ export function loadConfig(): NanoConfig {
     consolidation,
     heartbeat,
     scheduler,
+    thinkingLevel,
   };
 }

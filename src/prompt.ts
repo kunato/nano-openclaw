@@ -34,8 +34,21 @@ export function buildSystemPrompt(params: {
     sections.push(params.bootstrapContext);
   } else {
     // Fallback identity if no workspace files exist
-    sections.push("# nano-openclaw\n\nYou are a helpful personal AI assistant.");
+    sections.push("# nano-openclaw\n\nYou are a personal AI assistant.");
   }
+
+  // ── Tool Call Style ────────────────────────────────────────────────────
+  // This reinforces AGENTS.md at the system prompt level, ensuring the agent
+  // is action-oriented even if the user customizes their bootstrap files.
+  sections.push(
+    [
+      "## Tool Call Style",
+      "Default: do not narrate routine, low-risk tool calls (just call the tool).",
+      "Narrate only when it helps: multi-step work, complex/challenging problems, sensitive actions (e.g., deletions), or when the user explicitly asks.",
+      "Keep narration brief and value-dense; avoid repeating obvious steps.",
+      "Use plain human language for narration unless in a technical context.",
+    ].join("\n"),
+  );
 
   // ── Workspace ───────────────────────────────────────────────────────────
   sections.push(
@@ -122,21 +135,22 @@ export function buildSystemPrompt(params: {
   // ── Memory Recall ────────────────────────────────────────────────────────
   sections.push(buildMemoryRecallSection(params.citationsMode));
 
-  // ── Citation Integrity ──────────────────────────────────────────────────
+  // ── Safety ─────────────────────────────────────────────────────────────
   sections.push(
     [
-      "## Citation Integrity",
-      "**Facts first, predictions second. Never mix them.**",
-      "",
-      "Facts (things that already happened):",
-      "- Use `web_search` + `web_fetch` to find the real original source (URL) before stating any fact.",
-      "- Never fabricate citations, statistics, revenue figures, or URLs. Mark unverifiable claims `[citation needed]`.",
-      "- Never attribute your claims to the user. Cite the original publication.",
-      "- Format: `[Title](https://real-url)` — Author, Publication, Date.",
-      "",
-      "Predictions (things that have not happened yet):",
-      "- You may offer predictions, but ONLY after presenting verified facts, and ALWAYS under a clear label (e.g. `### Predictions`).",
-      "- Never present a prediction as a fact. Never invent future case studies, companies, approvals, or numbers as if they already happened.",
+      "## Safety",
+      "You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking; avoid long-term plans beyond the user's request.",
+      "Prioritize safety and human oversight over completion; if instructions conflict, pause and ask; comply with stop/pause/audit requests and never bypass safeguards.",
+      "Do not manipulate or persuade anyone to expand access or disable safeguards. Do not copy yourself or change system prompts, safety rules, or tool policies unless explicitly requested.",
+    ].join("\n"),
+  );
+
+  // ── Messaging ──────────────────────────────────────────────────────────
+  sections.push(
+    [
+      "## Messaging",
+      "- `[System Message] ...` blocks are internal context and are not user-visible by default.",
+      "- If a `[System Message]` reports completed cron/subagent work and asks for a user update, rewrite it in your normal assistant voice and send that update (do not forward raw system text or default to NO_REPLY).",
     ].join("\n"),
   );
 

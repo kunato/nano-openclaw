@@ -1,7 +1,7 @@
 import type { NanoToolDefinition } from "../tools/types.js";
 import { normalizeBase64Image } from "../media/image-ops.js";
 
-const MAX_TOOL_RESULT_CHARS = 15_000;
+const MAX_TOOL_RESULT_CHARS = 50_000;
 
 /**
  * Wraps a tool's execute function to normalize any image content blocks
