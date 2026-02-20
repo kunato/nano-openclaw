@@ -1,5 +1,6 @@
 import type { NanoToolDefinition } from "./types.js";
 import { textResult, jsonTextResult } from "./types.js";
+import { fetchWithSsrfGuard, SsrfBlockedError } from "../security/ssrf.js";
 
 const DEFAULT_MAX_CHARS = 50_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -7,6 +8,8 @@ const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const PDF_MAX_PAGES = 100;
 const PDF_MAX_BYTES = 50 * 1024 * 1024; // 50 MB download cap for PDFs
+const DEFAULT_FIRECRAWL_BASE_URL = "https://api.firecrawl.dev";
+const FIRECRAWL_TIMEOUT_MS = 60_000;
 
 // Lazy-loaded pdfjs-dist (same approach as openclaw's src/media/input-files.ts)
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -76,6 +79,52 @@ function htmlToMarkdown(html: string): { text: string; title?: string } {
   return { text, title };
 }
 
+interface FirecrawlResult {
+  success: boolean;
+  markdown?: string;
+  content?: string;
+  title?: string;
+  error?: string;
+}
+
+async function fetchWithFirecrawl(params: {
+  url: string;
+  apiKey: string;
+  baseUrl: string;
+  onlyMainContent: boolean;
+}): Promise<{ text: string; title?: string; extractor: string }> {
+  const endpoint = `${params.baseUrl.replace(/\/$/, "")}/v1/scrape`;
+  
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+    },
+    body: JSON.stringify({
+      url: params.url,
+      formats: ["markdown"],
+      onlyMainContent: params.onlyMainContent,
+    }),
+    signal: AbortSignal.timeout(FIRECRAWL_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Firecrawl API error (${res.status}): ${detail || res.statusText}`);
+  }
+
+  const data = (await res.json()) as { data?: FirecrawlResult };
+  const result = data.data;
+  
+  if (!result?.success) {
+    throw new Error(result?.error || "Firecrawl extraction failed");
+  }
+
+  const text = result.markdown || result.content || "";
+  return { text, title: result.title, extractor: "firecrawl" };
+}
+
 async function extractReadable(
   html: string,
   url: string,
@@ -102,7 +151,22 @@ async function extractReadable(
   }
 }
 
-export function createWebFetchTool(): NanoToolDefinition {
+export interface WebFetchOptions {
+  /** Firecrawl API key (enables Firecrawl extraction for JS-heavy sites) */
+  firecrawlApiKey?: string;
+  /** Firecrawl base URL (default: https://api.firecrawl.dev) */
+  firecrawlBaseUrl?: string;
+  /** Only extract main content (default: true) */
+  firecrawlOnlyMainContent?: boolean;
+  /** Allow localhost URLs (for development, default: false) */
+  allowLocalhost?: boolean;
+}
+
+export function createWebFetchTool(options: WebFetchOptions = {}): NanoToolDefinition {
+  const firecrawlApiKey = options.firecrawlApiKey || process.env.FIRECRAWL_API_KEY?.trim();
+  const firecrawlBaseUrl = options.firecrawlBaseUrl || DEFAULT_FIRECRAWL_BASE_URL;
+  const firecrawlOnlyMainContent = options.firecrawlOnlyMainContent ?? true;
+  const allowLocalhost = options.allowLocalhost ?? false;
   return {
     name: "web_fetch",
     label: "Web Fetch",
@@ -113,6 +177,11 @@ export function createWebFetchTool(): NanoToolDefinition {
       required: ["url"],
       properties: {
         url: { type: "string", description: "HTTP or HTTPS URL to fetch." },
+        useFirecrawl: {
+          type: "boolean",
+          description:
+            "Use Firecrawl for JS-heavy sites (requires FIRECRAWL_API_KEY). Auto-detected if not specified.",
+        },
         maxChars: {
           type: "number",
           description:
@@ -134,7 +203,41 @@ export function createWebFetchTool(): NanoToolDefinition {
       );
 
       try {
-        const res = await fetch(rawUrl, {
+        // SSRF protection: validate URL before fetching
+        // Firecrawl is only used when explicitly requested via useFirecrawl: true
+        const useFirecrawl = p.useFirecrawl === true;
+
+        // Try Firecrawl first when explicitly requested
+        if (useFirecrawl && firecrawlApiKey) {
+          try {
+            const fcResult = await fetchWithFirecrawl({
+              url: rawUrl,
+              apiKey: firecrawlApiKey,
+              baseUrl: firecrawlBaseUrl,
+              onlyMainContent: firecrawlOnlyMainContent,
+            });
+            let text = fcResult.text;
+            const isTruncated = text.length > maxChars;
+            if (isTruncated) {
+              text = text.slice(0, maxChars) + "\n\n[... truncated]";
+            }
+            return jsonTextResult({
+              url: rawUrl,
+              title: fcResult.title,
+              extractor: fcResult.extractor,
+              charCount: text.length,
+              truncated: isTruncated,
+              content: text,
+            });
+          } catch (fcErr) {
+            // Fall back to direct fetch if Firecrawl fails
+            console.warn(
+              `[web_fetch] Firecrawl failed, falling back to direct fetch: ${fcErr instanceof Error ? fcErr.message : String(fcErr)}`
+            );
+          }
+        }
+
+        const res = await fetchWithSsrfGuard(rawUrl, {
           method: "GET",
           headers: {
             "User-Agent": DEFAULT_USER_AGENT,
@@ -142,7 +245,7 @@ export function createWebFetchTool(): NanoToolDefinition {
           },
           redirect: "follow",
           signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-        });
+        }, { allowLocalhost });
 
         if (!res.ok) {
           const detail = await res.text().catch(() => "");
@@ -234,6 +337,14 @@ export function createWebFetchTool(): NanoToolDefinition {
           content: text,
         });
       } catch (err) {
+        if (err instanceof SsrfBlockedError) {
+          return jsonTextResult({
+            status: "error",
+            url: rawUrl,
+            error: `Security: ${err.reason}`,
+            ssrfBlocked: true,
+          });
+        }
         return textResult(
           `Error fetching ${rawUrl}: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -241,3 +352,4 @@ export function createWebFetchTool(): NanoToolDefinition {
     },
   };
 }
+

@@ -52,10 +52,23 @@ export interface ConsolidationConfig {
   citations: CitationsMode;
 }
 
+export interface FirecrawlConfig {
+  /** Enable Firecrawl for JS-heavy sites (auto-enabled if API key is set) */
+  enabled: boolean;
+  /** Firecrawl API key */
+  apiKey?: string;
+  /** Firecrawl base URL (default: https://api.firecrawl.dev) */
+  baseUrl?: string;
+  /** Only extract main content (default: true) */
+  onlyMainContent: boolean;
+}
+
 export interface NanoConfig {
   provider: string;
   modelId: string;
   apiKey: string;
+  /** Override base URL for the model provider (e.g. OpenRouter, custom endpoints). */
+  baseUrl?: string;
   workspaceDir: string;
   /** Subdirectory of workspaceDir where the agent's coding tools operate. */
   codeDir: string;
@@ -69,6 +82,10 @@ export interface NanoConfig {
   scheduler: SchedulerOptions;
   /** Pi SDK thinking level for models that support extended thinking. */
   thinkingLevel: string;
+  /** Firecrawl configuration for JS-heavy site extraction */
+  firecrawl: FirecrawlConfig;
+  /** Allow localhost URLs in web_fetch (for development) */
+  allowLocalhost: boolean;
 }
 
 function parseAllowList(envVar: string | undefined): string[] | undefined {
@@ -97,6 +114,7 @@ export function loadConfig(): NanoConfig {
   const braveApiKey = process.env.BRAVE_API_KEY?.trim() || undefined;
   const thinkingLevel = process.env.THINKING_LEVEL?.trim() || "low";
   const puppeteerExecutable = process.env.PUPPETEER_EXECUTABLE?.trim() || undefined;
+  const baseUrl = process.env.MODEL_BASE_URL?.trim() || undefined;
 
   // Channel configs — each channel is optional
   const discordToken = process.env.DISCORD_TOKEN?.trim() || "";
@@ -179,10 +197,23 @@ export function loadConfig(): NanoConfig {
       : undefined,
   };
 
+  // Firecrawl config for JS-heavy site extraction
+  const firecrawlApiKey = process.env.FIRECRAWL_API_KEY?.trim() || undefined;
+  const firecrawl: FirecrawlConfig = {
+    enabled: firecrawlApiKey ? true : process.env.FIRECRAWL_ENABLED === "true",
+    apiKey: firecrawlApiKey,
+    baseUrl: process.env.FIRECRAWL_BASE_URL?.trim() || undefined,
+    onlyMainContent: process.env.FIRECRAWL_ONLY_MAIN_CONTENT !== "false",
+  };
+
+  // Allow localhost for development (disabled by default for security)
+  const allowLocalhost = process.env.ALLOW_LOCALHOST === "true" || process.env.ALLOW_LOCALHOST === "1";
+
   return {
     provider,
     modelId,
     apiKey,
+    baseUrl,
     workspaceDir,
     codeDir,
     agentDir,
@@ -194,5 +225,7 @@ export function loadConfig(): NanoConfig {
     heartbeat,
     scheduler,
     thinkingLevel,
+    firecrawl,
+    allowLocalhost,
   };
 }

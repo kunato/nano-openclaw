@@ -123,6 +123,7 @@ export function buildSystemPrompt(params: {
       "- `subagent spawn` — launch a new subagent for a task. It runs in the background.",
       "- `subagent list` — check status of your spawned subagents.",
       "- `subagent kill` — abort a running subagent by its runId.",
+      "- `subagent research` — spawn multiple parallel research subagents to gather information from different sources.",
       "",
       "Results are **auto-announced**: when a subagent finishes, a system message with its result",
       "will appear in your session automatically. You do NOT need to poll for status.",
@@ -131,6 +132,9 @@ export function buildSystemPrompt(params: {
       "Each subagent gets its own session and full tool access.",
     ].join("\n"),
   );
+
+  // ── Deep Research Workflow ─────────────────────────────────────────────────
+  sections.push(buildResearchWorkflowSection());
 
   // ── Memory Recall ────────────────────────────────────────────────────────
   sections.push(buildMemoryRecallSection(params.citationsMode));
@@ -160,6 +164,53 @@ export function buildSystemPrompt(params: {
   }
 
   return sections.join("\n\n---\n\n");
+}
+
+/**
+ * Build critical instructions section - high-priority rules that MUST be followed.
+ */
+function buildCriticalInstructionsSection(): string {
+  return [
+    "## ⚠️ Critical Instructions",
+    "",
+    "### Research Requests → MUST Use Subagents",
+    "When the user asks you to research, investigate, find information about, or learn about ANY topic:",
+    "",
+    "**DO NOT** just call `web_search` directly.",
+    "**DO** call `subagent` tool with `action: \"research\"` and `topic: \"<the topic>\"` first.",
+    "",
+    "This spawns 4 parallel research subagents that will:",
+    "1. Search multiple sources (academic, official, community, news)",
+    "2. Fetch and read full article content (not just search snippets)",
+    "3. Return comprehensive summaries with citations",
+    "",
+    "**Example:**",
+    "User: \"Research domain-invariant audio representations\" ",
+    "You: Call `subagent` with `{\"action\": \"research\", \"topic\": \"domain-invariant audio representations\"}`",
+    "",
+    "**Only use direct `web_search` for:**",
+    "- Quick fact lookups (\"what year was X founded\")",
+    "- Simple definitions (\"what is X\")",
+    "- After subagents complete, for follow-up clarifications",
+  ].join("\n");
+}
+
+function buildResearchWorkflowSection(): string {
+  return [
+    "## Deep Research Workflow",
+    "",
+    "### After spawning research subagents:",
+    "1. Acknowledge to the user that research is starting (e.g., \"Starting deep research on X...\")",
+    "2. Wait for subagent result announcements (they will appear as [System Message])",
+    "3. After ALL 4 subagents complete, synthesize their findings",
+    "4. Present a comprehensive response with:",
+    "   - Key findings from each source type",
+    "   - Cross-referenced conclusions",
+    "   - All sources cited with URLs",
+    "",
+    "### If subagent spawning fails:",
+    "Fall back to manual research: call `web_search`, then `web_fetch` on top results.",
+  ].join("\n");
 }
 
 /**

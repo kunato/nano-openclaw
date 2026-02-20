@@ -35,11 +35,13 @@ import {
   buildAnnounceMessage,
   MAX_SPAWN_DEPTH,
   type AnnounceCallback,
+  type SpawnProgressCallback,
+  type SubagentToolProgressCallback,
 } from "./subagent.js";
 import { createSubagentTool } from "./tools/subagent.js";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { SandboxContext } from "./sandbox/types.js";
 import { resolveSandboxContext, createSandboxedExecTool } from "./sandbox/index.js";
 
@@ -80,6 +82,8 @@ export class AgentRunner {
   private consolidator: MemoryConsolidator;
   private subagentRegistry: SubagentRegistry;
   private announceCallback?: AnnounceCallback;
+  private spawnProgressCallback?: SpawnProgressCallback;
+  private subagentToolProgressCallback?: SubagentToolProgressCallback;
 
   constructor(config: NanoConfig) {
     this.config = config;
@@ -98,6 +102,14 @@ export class AgentRunner {
 
   setAnnounceCallback(callback: AnnounceCallback): void {
     this.announceCallback = callback;
+  }
+
+  setSpawnProgressCallback(callback: SpawnProgressCallback): void {
+    this.spawnProgressCallback = callback;
+  }
+
+  setSubagentToolProgressCallback(callback: SubagentToolProgressCallback): void {
+    this.subagentToolProgressCallback = callback;
   }
 
   getSubagentRegistry(): SubagentRegistry {
@@ -119,6 +131,8 @@ export class AgentRunner {
     const parentDepth = this.subagentRegistry.getDepthForSession(params.parentSessionKey);
     const childDepth = parentDepth + 1;
 
+    console.log(`[subagent.spawn] runId=${runId.slice(0, 8)}, parentSession=${params.parentSessionKey}, parentChannel=${params.parentChannelId}, depth=${childDepth}, label=${params.label || 'none'}`);
+
     // Register the run before starting
     this.subagentRegistry.register({
       runId,
@@ -133,6 +147,26 @@ export class AgentRunner {
     });
 
     const startedAt = Date.now();
+    const totalSpawned = this.subagentRegistry.countActiveForSession(params.parentSessionKey);
+    console.log(`[subagent.spawn] Active children for session: ${totalSpawned}`);
+
+    // Notify spawn progress to channel
+    if (this.spawnProgressCallback) {
+      console.log(`[subagent.spawn] Calling spawnProgressCallback (parentChannelId=${params.parentChannelId})`);
+      this.spawnProgressCallback({
+        parentSessionKey: params.parentSessionKey,
+        parentChannelId: params.parentChannelId,
+        runId,
+        label: params.label,
+        task: params.task,
+        depth: childDepth,
+        totalSpawned,
+      }).catch((err) => {
+        console.error(`[subagent.spawn] Spawn progress callback FAILED:`, err);
+      });
+    } else {
+      console.log(`[subagent.spawn] WARNING: No spawnProgressCallback set`);
+    }
 
     // Fire-and-forget: run the subagent in the background
     const run = async () => {
@@ -154,15 +188,56 @@ export class AgentRunner {
         isGroup: false,
       };
 
+      // Build stream callbacks for subagent so tool progress is visible
+      const subagentStream: StreamCallbacks = {};
+      if (this.subagentToolProgressCallback) {
+        const progressCb = this.subagentToolProgressCallback;
+        const subLabel = params.label;
+        const subChannelId = params.parentChannelId;
+        const subRunId = runId;
+        const subToolTimers = new Map<string, number>();
+
+        subagentStream.onToolStart = async (toolName: string, meta?: string) => {
+          subToolTimers.set(toolName, Date.now());
+          progressCb({
+            parentChannelId: subChannelId,
+            runId: subRunId,
+            label: subLabel,
+            event: "tool_start",
+            toolName,
+            meta,
+          }).catch(() => {});
+        };
+        subagentStream.onToolEnd = async (
+          toolName: string,
+          info: { durationMs: number; error?: string; preview?: string },
+        ) => {
+          subToolTimers.delete(toolName);
+          progressCb({
+            parentChannelId: subChannelId,
+            runId: subRunId,
+            label: subLabel,
+            event: "tool_end",
+            toolName,
+            durationMs: info.durationMs,
+            error: info.error,
+            preview: info.preview,
+          }).catch(() => {});
+        };
+      }
+
       let resultText: string;
       let status: "ok" | "error";
       try {
-        const response = await this._handleMessage(msg, {}, { extraSystemPrompt: childSystemPrompt });
+        console.log(`[subagent.run] Starting _handleMessage for ${runId.slice(0, 8)} (${params.label || 'no label'})`);
+        const response = await this._handleMessage(msg, subagentStream, { extraSystemPrompt: childSystemPrompt });
         resultText = response?.text || "(no output)";
         status = "ok";
+        console.log(`[subagent.run] Completed ${runId.slice(0, 8)}: status=ok, resultLen=${resultText.length}`);
       } catch (err) {
         resultText = err instanceof Error ? err.message : String(err);
         status = "error";
+        console.error(`[subagent.run] Failed ${runId.slice(0, 8)}: ${resultText.slice(0, 200)}`);
       }
 
       const endedAt = Date.now();
@@ -174,6 +249,7 @@ export class AgentRunner {
 
       // Announce result back to parent session
       if (this.announceCallback) {
+        console.log(`[subagent.announce] Announcing ${runId.slice(0, 8)} (${status}) to ${params.parentSessionKey}, channelId=${params.parentChannelId}`);
         try {
           await this.announceCallback({
             parentSessionKey: params.parentSessionKey,
@@ -328,6 +404,68 @@ export class AgentRunner {
     return data.choices[0]?.message?.content ?? "";
   }
 
+  /**
+   * Build a fallback model when the Pi SDK built-in registry doesn't have it.
+   * Follows OpenClaw's resolveModel pattern: construct the Model object manually
+   * using the configured provider, modelId, baseUrl, and sensible defaults.
+   * This enables OpenRouter models (e.g. minimax/minimax-m2.5), custom endpoints, etc.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private buildFallbackModel(): any | undefined {
+    const { provider, modelId, baseUrl } = this.config;
+
+    // Default base URLs for known providers
+    const KNOWN_BASE_URLS: Record<string, string> = {
+      openrouter: "https://openrouter.ai/api/v1",
+      openai: "https://api.openai.com/v1",
+      groq: "https://api.groq.com/openai/v1",
+      cerebras: "https://api.cerebras.ai/v1",
+      mistral: "https://api.mistral.ai/v1",
+      xai: "https://api.x.ai/v1",
+      minimax: "https://api.minimax.chat/v1",
+      "minimax-cn": "https://api.minimax.chat/v1",
+      huggingface: "https://api-inference.huggingface.co/v1",
+      "vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1",
+    };
+
+    // Known providers that use anthropic-messages API
+    const ANTHROPIC_API_PROVIDERS = new Set(["anthropic"]);
+    // Known providers that use openai-responses API
+    const RESPONSES_API_PROVIDERS = new Set(["openai", "azure-openai-responses"]);
+
+    const resolvedBaseUrl = baseUrl || KNOWN_BASE_URLS[provider];
+    if (!resolvedBaseUrl) {
+      console.warn(`[agent] No base URL for provider "${provider}". Set MODEL_BASE_URL env var.`);
+      return undefined;
+    }
+
+    // Determine the API type based on provider
+    let api: string;
+    if (ANTHROPIC_API_PROVIDERS.has(provider)) {
+      api = "anthropic-messages";
+    } else if (RESPONSES_API_PROVIDERS.has(provider)) {
+      api = "openai-responses";
+    } else {
+      // OpenRouter and most custom providers are OpenAI-completions compatible
+      api = "openai-completions";
+    }
+
+    console.log(`[agent] Building fallback model: provider=${provider}, modelId=${modelId}, api=${api}, baseUrl=${resolvedBaseUrl}`);
+
+    return {
+      id: modelId,
+      name: modelId,
+      api,
+      provider,
+      baseUrl: resolvedBaseUrl,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 16384,
+    };
+  }
+
   private async ensureAgentFiles(): Promise<void> {
     const authPath = path.join(this.config.agentDir, "auth.json");
     try {
@@ -349,6 +487,29 @@ export class AgentRunner {
     return path.join(this.config.agentDir, "sessions", `${safe}.jsonl`);
   }
 
+  private async writeDebugLog(logPath: string, entry: Record<string, unknown>): Promise<void> {
+    try {
+      let entries: Array<Record<string, unknown>> = [];
+      try {
+        const existing = await fs.readFile(logPath, "utf-8");
+        entries = JSON.parse(existing);
+        if (!Array.isArray(entries)) entries = [];
+      } catch {
+        // File doesn't exist or is invalid, start fresh
+      }
+      
+      // Keep only last 100 entries to prevent unbounded growth
+      entries.push(entry);
+      if (entries.length > 100) {
+        entries = entries.slice(-100);
+      }
+      
+      await fs.writeFile(logPath, JSON.stringify(entries, null, 2));
+    } catch (err) {
+      console.warn(`[debug] Failed to write debug log:`, err instanceof Error ? err.message : String(err));
+    }
+  }
+
   private buildCustomTools(sessionKey: string, channelId?: string): NanoToolDefinition[] {
     const tools: NanoToolDefinition[] = [];
 
@@ -364,7 +525,12 @@ export class AgentRunner {
     );
     tools.push(createMemoryGetTool({ workspaceDir: this.config.workspaceDir }));
 
-    tools.push(createWebFetchTool());
+    tools.push(createWebFetchTool({
+      firecrawlApiKey: this.config.firecrawl.apiKey,
+      firecrawlBaseUrl: this.config.firecrawl.baseUrl,
+      firecrawlOnlyMainContent: this.config.firecrawl.onlyMainContent,
+      allowLocalhost: this.config.allowLocalhost,
+    }));
 
     if (this.config.braveApiKey) {
       tools.push(createWebSearchTool(this.config.braveApiKey));
@@ -462,6 +628,25 @@ export class AgentRunner {
     const sessionFile = this.resolveSessionFile(msg.sessionKey);
     await fs.mkdir(path.dirname(sessionFile), { recursive: true });
 
+    // Debug logging: capture turn input
+    const turnId = randomUUID().slice(0, 8);
+    const debugLogPath = path.join(this.config.agentDir, "debug.json");
+    const debugEntry: Record<string, unknown> = {
+      turnId,
+      timestamp: new Date().toISOString(),
+      sessionKey: msg.sessionKey,
+      input: {
+        text: msg.text,
+        userId: msg.userId,
+        userName: msg.userName,
+        channelId: msg.channelId,
+        isGroup: msg.isGroup,
+        hasImages: !!msg.images?.length,
+      },
+      tools: [] as Array<{ name: string; args: unknown; result: unknown; error?: string; durationMs: number }>,
+    };
+    console.log(`[debug] Turn ${turnId} started: ${msg.text.slice(0, 80)}`);
+
     // Abort controller for this run
     const abortController = new AbortController();
     this.activeAbortControllers.set(msg.sessionKey, abortController);
@@ -476,18 +661,27 @@ export class AgentRunner {
       authStorage,
       path.join(this.config.agentDir, "models.json"),
     );
-    const model = modelRegistry.find(
+    let model = modelRegistry.find(
       this.config.provider,
       this.config.modelId,
     );
 
+    // Fallback model resolution (follows OpenClaw's resolveModel pattern):
+    // When the model isn't in the Pi SDK built-in registry, construct one.
+    // This enables OpenRouter models (e.g. minimax/minimax-m2.5) and custom endpoints.
     if (!model) {
-      console.error(
-        `[agent] Model not found: ${this.config.provider}/${this.config.modelId}`,
-      );
-      return {
-        text: `Error: model ${this.config.provider}/${this.config.modelId} not found in Pi SDK registry.`,
-      };
+      const fallback = this.buildFallbackModel();
+      if (fallback) {
+        model = fallback as typeof model;
+        console.log(`[agent] Using fallback model: ${this.config.provider}/${this.config.modelId} (api=${fallback.api}, baseUrl=${fallback.baseUrl})`);
+      } else {
+        console.error(
+          `[agent] Model not found: ${this.config.provider}/${this.config.modelId}`,
+        );
+        return {
+          text: `Error: model ${this.config.provider}/${this.config.modelId} not found in Pi SDK registry.`,
+        };
+      }
     }
 
     // Repair corrupted session file before opening
@@ -510,6 +704,7 @@ export class AgentRunner {
 
     // Custom tools
     const customTools = this.buildCustomTools(msg.sessionKey, msg.channelId);
+    console.log(`[debug] Built ${customTools.length} custom tools: ${customTools.map(t => t.name).join(', ')}`);
 
     // When sandbox is enabled, add the sandboxed exec tool and filter out
     // the built-in bash/exec from codingTools (same pattern as OpenClaw's
@@ -522,6 +717,9 @@ export class AgentRunner {
           (t) => t.name !== "bash" && t.name !== "exec",
         )
       : codingTools;
+
+    console.log(`[debug] Total tools for session: ${tools.length} built-in + ${customTools.length} custom`);
+    console.log(`[debug] Custom tools: ${customTools.map(t => t.name).join(', ')}`);
 
     // Create agent session — cwd is codeDir so coding tools operate in the isolated code directory
     const { session } = await createAgentSession({
@@ -587,6 +785,7 @@ export class AgentRunner {
     // Subscribe to session events for streaming feedback
     const collectedImages: ImageAttachment[] = [];
     const toolTimers = new Map<string, number>();
+    const toolDebugMap = new Map<string, { name: string; args: unknown; startTime: number }>();
     let thinkingEmitted = false;
 
     const unsubscribe = session.subscribe(
@@ -604,7 +803,9 @@ export class AgentRunner {
             const toolName = String(evt.toolName ?? "tool");
             const toolCallId = String(evt.toolCallId ?? toolName);
             const meta = inferToolMeta(toolName, evt.args);
-            toolTimers.set(toolCallId, Date.now());
+            const startTime = Date.now();
+            toolTimers.set(toolCallId, startTime);
+            toolDebugMap.set(toolCallId, { name: toolName, args: evt.args, startTime });
             stream.onToolStart?.(toolName, meta);
             break;
           }
@@ -614,6 +815,40 @@ export class AgentRunner {
             const startTime = toolTimers.get(toolCallId) ?? Date.now();
             const durationMs = Date.now() - startTime;
             toolTimers.delete(toolCallId);
+            
+            // Capture tool call for debug log
+            const toolDebug = toolDebugMap.get(toolCallId);
+            if (toolDebug) {
+              const result = evt.result as Record<string, unknown> | undefined;
+              const content = result?.content;
+              let resultText: string | undefined;
+              let errorText: string | undefined;
+              
+              if (Array.isArray(content)) {
+                const textBlock = content.find(
+                  (b: unknown) =>
+                    typeof b === "object" &&
+                    b !== null &&
+                    (b as Record<string, unknown>).type === "text",
+                ) as { text?: string } | undefined;
+                if (textBlock?.text) {
+                  if (textBlock.text.startsWith("Error:") || textBlock.text.includes('"status": "error"')) {
+                    errorText = textBlock.text.slice(0, 500);
+                  } else {
+                    resultText = textBlock.text.slice(0, 500);
+                  }
+                }
+              }
+              
+              (debugEntry.tools as Array<unknown>).push({
+                name: toolDebug.name,
+                args: toolDebug.args,
+                result: resultText,
+                error: errorText,
+                durationMs,
+              });
+              toolDebugMap.delete(toolCallId);
+            }
 
             const result = evt.result as Record<string, unknown> | undefined;
             const content = result?.content;
@@ -787,6 +1022,16 @@ export class AgentRunner {
                 isGroup: msg.isGroup,
               })
             : "(no text response)";
+
+          // Debug logging: capture turn output
+          debugEntry.output = {
+            text: processedText,
+            hasImages: allImages.length > 0,
+            imageCount: allImages.length,
+          };
+          debugEntry.elapsed = Date.now() - startTime;
+          await this.writeDebugLog(debugLogPath, debugEntry);
+          console.log(`[debug] Turn ${turnId} completed: ${(debugEntry.tools as Array<unknown>).length} tools, ${debugEntry.elapsed}ms`);
 
           return {
             text: processedText,

@@ -6,7 +6,7 @@ import { ChannelManager } from "./channels/manager.js";
 import { Scheduler } from "./scheduler.js";
 import { HeartbeatService } from "./heartbeat.js";
 import { removeAllSandboxContainers } from "./sandbox/index.js";
-import { buildAnnounceMessage } from "./subagent.js";
+import { buildAnnounceMessage, buildSpawnProgressMessage } from "./subagent.js";
 
 async function main() {
   console.log("nano-openclaw starting...");
@@ -75,6 +75,69 @@ async function main() {
   // Connect scheduler to agent (so the cron tool is available)
   agent.setScheduler(scheduler);
 
+  // Wire subagent spawn progress callback: notify channel when subagents are spawned
+  agent.setSpawnProgressCallback(async (params) => {
+    const progressText = buildSpawnProgressMessage({
+      label: params.label,
+      task: params.task,
+      totalSpawned: params.totalSpawned,
+    });
+
+    const channelName = params.parentSessionKey.split(":")[0] || "discord";
+    console.log(
+      `[subagent.progress] label="${params.label || 'none'}" channelName=${channelName} parentChannelId=${params.parentChannelId} totalSpawned=${params.totalSpawned}`,
+    );
+
+    // Send progress update to the channel — use parentChannelId (actual channel ID),
+    // NOT the session key suffix (which is a user ID for DMs, not the channel ID).
+    if (params.parentChannelId) {
+      const targetChannel = channels.get(channelName);
+      console.log(`[subagent.progress] targetChannel found: ${!!targetChannel}, hasSendToChannel: ${!!(targetChannel && "sendToChannel" in targetChannel)}`);
+      if (targetChannel && "sendToChannel" in targetChannel) {
+        try {
+          await (targetChannel as { sendToChannel: (id: string, text: string) => Promise<void> }).sendToChannel(params.parentChannelId, progressText);
+          console.log(`[subagent.progress] Sent to ${channelName}:${params.parentChannelId}`);
+        } catch (err) {
+          console.error(`[subagent.progress] sendToChannel FAILED:`, err instanceof Error ? err.message : String(err));
+        }
+      }
+    } else {
+      console.log(`[subagent.progress] WARNING: parentChannelId is empty/missing`);
+    }
+  });
+
+  // Wire subagent tool progress callback: send each tool call from subagents to the channel
+  agent.setSubagentToolProgressCallback(async (params) => {
+    const channelName = "discord"; // subagents always inherit parent channel
+    const emoji: Record<string, string> = {
+      web_search: "🔍", web_fetch: "🌐", browser: "🖥️", read: "📄",
+      write: "✏️", edit: "📝", exec: "💻", bash: "💻", memory: "🧠",
+    };
+    const icon = emoji[params.toolName] ?? "🔧";
+    const labelTag = params.label ? `[${params.label.split(":").slice(1).join(":")}]` : "";
+
+    let text: string;
+    if (params.event === "tool_start") {
+      const meta = params.meta ? ` ${params.meta}` : "";
+      text = `${icon} ${labelTag} **${params.toolName}**${meta} ⏳`;
+    } else {
+      const dur = params.durationMs ? ` (${(params.durationMs / 1000).toFixed(1)}s)` : "";
+      if (params.error) {
+        text = `❌ ${labelTag} **${params.toolName}** failed: ${params.error.slice(0, 120)}${dur}`;
+      } else {
+        const prev = params.preview ? ` — ${params.preview}` : "";
+        text = `${icon} ${labelTag} **${params.toolName}**${prev}${dur} ✅`;
+      }
+    }
+
+    if (params.parentChannelId) {
+      const targetChannel = channels.get(channelName);
+      if (targetChannel && "sendToChannel" in targetChannel) {
+        await (targetChannel as { sendToChannel: (id: string, text: string) => Promise<void> }).sendToChannel(params.parentChannelId, text).catch(() => {});
+      }
+    }
+  });
+
   // Wire subagent announce callback: when a child subagent completes,
   // inject its result back into the parent session and deliver to the channel.
   agent.setAnnounceCallback(async (params) => {
@@ -91,11 +154,13 @@ async function main() {
       remainingActiveChildren: remainingActive,
     });
 
+    const channelName = params.parentSessionKey.split(":")[0] || "discord";
     console.log(
-      `[subagent] Announcing result for "${params.label || params.task.slice(0, 40)}" to ${params.parentSessionKey}`,
+      `[subagent.announce] label="${params.label || 'none'}" status=${params.status} channelName=${channelName} parentChannelId=${params.parentChannelId} remainingActive=${remainingActive}`,
     );
 
     // Inject the announce as a new message into the parent agent session
+    console.log(`[subagent.announce] Injecting announce message into parent session: ${params.parentSessionKey}`);
     const response = await agent.handleMessage({
       text: announceText,
       sessionKey: params.parentSessionKey,
@@ -104,23 +169,31 @@ async function main() {
       userName: "subagent-announce",
       isGroup: false,
     }, {});
+    console.log(`[subagent.announce] Parent response: text=${response?.text ? response.text.slice(0, 80) + '...' : 'null'}, isNoReply=${response?.text === 'NO_REPLY'}`);
 
-    // Deliver response to the appropriate channel
+    // Deliver response to the appropriate channel — use parentChannelId (actual channel ID),
+    // NOT the session key suffix (which is a user ID for DMs, not the channel ID).
     if (response?.text && response.text !== "NO_REPLY") {
-      const parts = params.parentSessionKey.split(":");
-      const channelName = parts[0] || "discord";
-      const channelId = parts[parts.length - 1];
-      if (channelId) {
+      if (params.parentChannelId) {
         const targetChannel = channels.get(channelName);
+        console.log(`[subagent.announce] Delivering to ${channelName}:${params.parentChannelId}, targetChannel=${!!targetChannel}`);
         if (targetChannel && "sendToChannel" in targetChannel) {
           const images = response.images?.map((img) => ({
             data: img.data,
             name: img.name,
           }));
-          await (targetChannel as { sendToChannel: (id: string, text: string, images?: unknown) => Promise<void> }).sendToChannel(channelId, response.text, images);
-          console.log(`[subagent] Delivered announce response to ${channelName}:${channelId}`);
+          try {
+            await (targetChannel as { sendToChannel: (id: string, text: string, images?: unknown) => Promise<void> }).sendToChannel(params.parentChannelId, response.text, images);
+            console.log(`[subagent.announce] Delivered to ${channelName}:${params.parentChannelId}`);
+          } catch (err) {
+            console.error(`[subagent.announce] sendToChannel FAILED:`, err instanceof Error ? err.message : String(err));
+          }
         }
+      } else {
+        console.log(`[subagent.announce] WARNING: parentChannelId is empty/missing, cannot deliver`);
       }
+    } else {
+      console.log(`[subagent.announce] No delivery needed (no text or NO_REPLY)`);
     }
   });
 

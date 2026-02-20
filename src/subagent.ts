@@ -31,6 +31,28 @@ export type AnnounceCallback = (params: {
   endedAt: number;
 }) => Promise<void>;
 
+export type SpawnProgressCallback = (params: {
+  parentSessionKey: string;
+  parentChannelId: string;
+  runId: string;
+  label?: string;
+  task: string;
+  depth: number;
+  totalSpawned: number;
+}) => Promise<void>;
+
+export type SubagentToolProgressCallback = (params: {
+  parentChannelId: string;
+  runId: string;
+  label?: string;
+  event: "tool_start" | "tool_end";
+  toolName: string;
+  meta?: string;
+  durationMs?: number;
+  error?: string;
+  preview?: string;
+}) => Promise<void>;
+
 // ── Constants ──────────────────────────────────────────────────────────
 
 export const MAX_SPAWN_DEPTH = 2;
@@ -258,6 +280,22 @@ export function buildSubagentSystemPrompt(params: {
   );
 
   return lines.join("\n");
+}
+
+// ── Progress Message Builder ────────────────────────────────────────────
+
+export function buildSpawnProgressMessage(params: {
+  label?: string;
+  task: string;
+  totalSpawned: number;
+}): string {
+  const taskLabel = params.label || params.task.slice(0, 60);
+  const emoji = "🔄";
+  
+  if (params.totalSpawned === 1) {
+    return `${emoji} Starting research subagent: **${taskLabel}**`;
+  }
+  return `${emoji} Spawned subagent ${params.totalSpawned}: **${taskLabel}**`;
 }
 
 // ── Announce Message Builder ───────────────────────────────────────────
